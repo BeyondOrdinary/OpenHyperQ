@@ -22,10 +22,10 @@ namespace HyperQ.Util
         /// </summary>
         private Dictionary<uint, T> _MapFromIndices = new Dictionary<uint, T>();
         /// <summary>
-        /// List of the indices that are free when the keys are removed from the mapper. Default will
-        /// use the shared index repository.
+        /// Hands out the indexes and keeps the ones freed when keys are removed. The mapper's own unless one
+        /// was given to share.
         /// </summary>
-        private IndexRepo _indices = IndexRepo.Instance;
+        private IndexRepo _indices;
         /// <summary>
         /// The max mappable value, defaults to -1 if no max
         /// </summary>
@@ -101,10 +101,20 @@ namespace HyperQ.Util
         }
 
         /// <summary>
-        /// Default instance constructor, will use the shared index repository.
+        /// Creates a mapper with an index repository of its own, starting at zero.
         /// </summary>
         public IndexMapper()
         {
+            _indices = new IndexRepo();
+        }
+
+        /// <summary>
+        /// Creates a mapper that draws its indexes from the given repository, shared with the other mappers
+        /// whose indexes must not collide with this one's.
+        /// </summary>
+        public IndexMapper(IndexRepo repo)
+        {
+            _indices = repo ?? throw new ArgumentNullException(nameof(repo));
         }
 
         public Dictionary<T,uint>.KeyCollection Keys
@@ -112,6 +122,17 @@ namespace HyperQ.Util
             get
             {
                 return _MapToIndices.Keys;
+            }
+        }
+
+        /// <summary>
+        /// Enumerates every (key, index) pair held by this mapper.
+        /// </summary>
+        public IEnumerable<KeyValuePair<T, uint>> Mappings
+        {
+            get
+            {
+                return _MapToIndices;
             }
         }
         public virtual IndexRepo Repo
@@ -138,10 +159,9 @@ namespace HyperQ.Util
 
         public virtual IIndexMapper<T> Clone()
         {
-            IndexMapper<T> c = new IndexMapper<T>();
+            IndexMapper<T> c = new IndexMapper<T>(_indices);
             c._MapToIndices = new Dictionary<T, uint>(_MapToIndices);
             c._MapFromIndices = new Dictionary<uint, T>(_MapFromIndices);
-            c._indices = _indices;
             return (c);
         }
 
@@ -291,6 +311,60 @@ namespace HyperQ.Util
         {
             sw = sw ?? Console.Out;
             sw.WriteLine("IndexMapper: nextIndex={0}, #indices={1}, avg {2:F5}ms over {3} queries.", _indices.Peek, _MapToIndices.Keys.Count,_AvgLookup.Value, _AvgLookup.Count);
+        }
+
+        // ── checkpoints ──
+
+        /// <summary>
+        /// Restores a (key, index) pair recorded by a checkpoint. The index is reserved in the repository so
+        /// later allocations cannot collide with it.
+        /// </summary>
+        public virtual void Restore(T key, uint index)
+        {
+            _MapToIndices[key] = index;
+            _MapFromIndices[index] = key;
+            _indices.Reserve(index);
+        }
+
+        /// <summary>Forgets every mapping. Indices already handed out stay reserved in the repository.</summary>
+        public virtual void Clear()
+        {
+            _MapToIndices.Clear();
+            _MapFromIndices.Clear();
+            _RecentQueryState = default(T);
+            _RecentQueryResult = default(uint);
+        }
+
+        /// <summary>Writes every (key, index) pair and the repository's next index.</summary>
+        public void SaveCheckpoint(BinaryWriter writer, IQKeySerializer<T> keys)
+        {
+            if (keys == null) throw new ArgumentNullException(nameof(keys));
+            writer.Write(_MapToIndices.Count);
+            foreach (KeyValuePair<T, uint> kv in _MapToIndices)
+            {
+                keys.Serialize(writer.BaseStream, kv.Key);
+                writer.Write(kv.Value);
+            }
+            writer.Write(_indices.Peek);
+        }
+
+        /// <summary>Replaces the mappings with those written by <see cref="SaveCheckpoint"/>.</summary>
+        public void LoadCheckpoint(BinaryReader reader, IQKeySerializer<T> keys)
+        {
+            if (keys == null) throw new ArgumentNullException(nameof(keys));
+            Clear();
+            int count = reader.ReadInt32();
+            for (int i = 0; i < count; i++)
+            {
+                T key = keys.Deserialize(reader.BaseStream);
+                uint index = reader.ReadUInt32();
+                Restore(key, index);
+            }
+            uint next = reader.ReadUInt32();
+            if (_indices.Peek < next)
+            {
+                _indices.RestoreAt(next);
+            }
         }
     }
 }

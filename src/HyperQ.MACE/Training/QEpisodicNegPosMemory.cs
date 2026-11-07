@@ -24,7 +24,7 @@ namespace HyperQ.MACE.Training
         protected List<QEpisodicMemoryCell<T, RT>> _FullEpisodicMemory = new List<QEpisodicMemoryCell<T, RT>>();
         private QEpisodicMemoryCell<T, RT> _CurrentEpisode = null;
 
-        public QEpisodicNegPosMemory(int maxSize, QRandom ran = null) : base(maxSize, ran: ran)
+        public QEpisodicNegPosMemory(int maxSize, QRandom ran) : base(maxSize, ran: ran)
         {
         }
         /// <summary>
@@ -45,6 +45,10 @@ namespace HyperQ.MACE.Training
         }
         public override void ReplayEpisode(HyperParams hp, Func<QMemoryCell<T, RT>, HyperParams, bool> callback)
         {
+            if (_FullEpisodicMemory.Count == 0)
+            {
+                return;
+            }
             foreach (QMemoryCell<T, RT> mem in _FullEpisodicMemory[_FullEpisodicMemory.Count - 1].Memory)
             {
                 callback(mem, hp);

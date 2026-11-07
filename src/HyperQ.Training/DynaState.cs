@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using HyperQ.Util;
+using HyperQ.Util.Licensing;
 
 
 namespace HyperQ.Training
@@ -49,9 +50,11 @@ namespace HyperQ.Training
         private readonly Dictionary<IDynaEntry, Dictionary<T, double>> _T = new Dictionary<IDynaEntry, Dictionary<T, double>>();
 
         /// <summary>
-        /// Cached max of T[de]. Tuple is (state, probability)
+        /// Cached argmax of Tc[de]: (state, count), the most frequent next state so far (the first to reach that count
+        /// among equals). It used to keep (state, probability) and compare a new probability with the cached one,
+        /// which never shrank: the first next state seen had probability 1, so the model stayed on it for good.
         /// </summary>
-        private readonly Dictionary<IDynaEntry, Tuple<T, double>> _Tmax = new Dictionary<IDynaEntry, Tuple<T, double>>();
+        private readonly Dictionary<IDynaEntry, Tuple<T, int>> _Tmax = new Dictionary<IDynaEntry, Tuple<T, int>>();
 
         /// <summary>
         /// (s,a) = reward model (RT)
@@ -75,8 +78,15 @@ namespace HyperQ.Training
 
         /// <summary>
         /// Priority queue for prioritized sweeping (min-heap with negated priorities for max-first behavior).
+        /// It can hold stale copies of an entry whose priority was raised; <see cref="_Queued"/> says which copy counts.
         /// </summary>
         private readonly PriorityQueue<IDynaEntry, double> _PQueue = new PriorityQueue<IDynaEntry, double>();
+
+        /// <summary>
+        /// The priority each queued (s,a) entry waits with, at most one per entry, as in Moore and Atkeson's
+        /// prioritized sweeping.
+        /// </summary>
+        private readonly Dictionary<IDynaEntry, double> _Queued = new Dictionary<IDynaEntry, double>();
 
         /// <summary>
         /// Minimum absolute TD error required to insert an entry into the priority queue.
@@ -85,11 +95,14 @@ namespace HyperQ.Training
 
         public int DynaIterations { get; private set; } = 0;
         public int HistoryCapacity => _History?.Capacity ?? 0;
+        /// <summary>The number of (s,a) pairs the model has learned; planning has nothing to sample while it is 0.</summary>
+        public int Count => _Keys.Count;
         public bool PositiveOnly { get; private set; } = false;
 
 
         public DynaState(int iters = 500, int max_histories = 0, bool positive_only = false)
         {
+            FeatureGate.Require(HyperQFeatures.Dyna);
             DynaIterations = iters;
 
             if (max_histories > 0)
@@ -125,25 +138,53 @@ namespace HyperQ.Training
         // ── Prioritized sweeping public API ──
 
         /// <summary>
-        /// Inserts an (s,a) entry into the priority queue if its absolute TD error
-        /// exceeds the threshold. Duplicates are allowed; stale entries are harmless.
+        /// Queues an (s,a) entry if its absolute TD error exceeds the threshold. An entry waits in the queue at most
+        /// once, with the highest priority it was given. (Queueing every insertion, duplicates included, grew the queue
+        /// without bound: each planning sweep pops one entry and can push all of its predecessors, so long runs ran out
+        /// of memory.)
         /// </summary>
         public void InsertPriority(IDynaEntry entry, double absTdError)
         {
-            if (absTdError > PriorityThreshold)
-                _PQueue.Enqueue(entry, -absTdError); // negate for max-first
+            if (!(absTdError > PriorityThreshold))
+                return;
+            if (_Queued.TryGetValue(entry, out double queued) && queued >= absTdError)
+                return;
+            _Queued[entry] = absTdError;
+            _PQueue.Enqueue(entry, -absTdError); // negate for max-first
+            // Raising a queued entry's priority leaves its old copy behind; drop the stale copies when they outnumber the
+            // live entries, so the heap stays within about twice the number of queued entries.
+            if (_PQueue.Count > 2 * _Queued.Count + 64)
+            {
+                _PQueue.Clear();
+                foreach (KeyValuePair<IDynaEntry, double> kv in _Queued)
+                    _PQueue.Enqueue(kv.Key, -kv.Value);
+            }
         }
 
         /// <summary>
-        /// Pops the highest-priority (s,a) entry. Returns null if the queue is empty.
+        /// Pops the highest-priority (s,a) entry, skipping stale copies. Returns null if the queue is empty.
         /// </summary>
         public IDynaEntry PopPriority()
         {
-            return _PQueue.Count > 0 ? _PQueue.Dequeue() : null;
+            while (_PQueue.TryDequeue(out IDynaEntry entry, out double negated))
+            {
+                if (_Queued.TryGetValue(entry, out double queued) && queued == -negated)
+                {
+                    _Queued.Remove(entry);
+                    return entry;
+                }
+            }
+            return null;
         }
 
         /// <summary>True if the priority queue has entries to process.</summary>
-        public bool HasPriority => _PQueue.Count > 0;
+        public bool HasPriority => _Queued.Count > 0;
+
+        /// <summary>The number of (s,a) entries waiting in the priority queue.</summary>
+        public int QueuedCount => _Queued.Count;
+
+        /// <summary>The size of the queue's heap, stale copies included; it stays within about twice <see cref="QueuedCount"/>.</summary>
+        public int PriorityHeapSize => _PQueue.Count;
 
         /// <summary>
         /// Returns all (s,a) entries whose model predicts transitioning TO the given state.
@@ -173,10 +214,9 @@ namespace HyperQ.Training
             return (UpdateT(s, a, sprime).UpdateR(s, a, r, hp));
         }
 
-        public IDynaEntry RandomSA(QRandom ran = null)
+        public IDynaEntry RandomSA(QRandom ran)
         {
-            if(ran == null)
-                ran = QRandom.Instance;
+            if (ran == null) throw new ArgumentNullException(nameof(ran));
             if (_Keys.Count == 0) throw new InvalidOperationException("DynaState has no learned (s,a) entries.");
             int ix = ran.Ran.Next(0, _Keys.Count);
             return _Keys[ix];
@@ -197,10 +237,10 @@ namespace HyperQ.Training
             if (_Tmax.TryGetValue(de, out var cached))
                 return new Tuple<T, RT>(cached.Item1, r);
 
-            // Find argmax probability
-            var best = sT.Aggregate((a, b) => a.Value >= b.Value ? a : b);
+            // Find the most frequent next state
+            var best = _Tc[de].Aggregate((a, b) => a.Value >= b.Value ? a : b);
             var ret = new Tuple<T, RT>(best.Key, r);
-            _Tmax[de] = new Tuple<T, double>(best.Key, best.Value);
+            _Tmax[de] = new Tuple<T, int>(best.Key, best.Value);
 
             return ret;
         }
@@ -261,12 +301,15 @@ namespace HyperQ.Training
             _Tc[de][sprime] += 1;
             _TcSum[de] += 1;
 
-            double p = (double)_Tc[de][sprime] / _TcSum[de];
-            _T[de][sprime] = p;
+            // Every next state's probability changes with the total, not just this one's.
+            Dictionary<T, double> probabilities = _T[de];
+            foreach (KeyValuePair<T, int> kv in _Tc[de])
+                probabilities[kv.Key] = (double)kv.Value / _TcSum[de];
 
-            // Update cached max
-            if (!_Tmax.TryGetValue(de, out var mx) || p > mx.Item2)
-                _Tmax[de] = new Tuple<T, double>(sprime, p);
+            // Update the cached most frequent next state: counts only grow, so compare counts.
+            int count = _Tc[de][sprime];
+            if (!_Tmax.TryGetValue(de, out var mx) || count > mx.Item2)
+                _Tmax[de] = new Tuple<T, int>(sprime, count);
 
             // Maintain predecessor reverse map: sprime ← (s, a)
             if (!_Predecessors.TryGetValue(sprime, out var preds))

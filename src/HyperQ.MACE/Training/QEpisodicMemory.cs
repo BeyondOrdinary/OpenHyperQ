@@ -40,7 +40,7 @@ namespace HyperQ.MACE.Training
         protected List<QEpisodicMemoryCell<T, RT>> _EpisodicMemory = new List<QEpisodicMemoryCell<T, RT>>();
         private QEpisodicMemoryCell<T, RT> _CurrentEpisode = null;
 
-        public QEpisodicMemory(int maxSize, QRandom ran = null) : base(maxSize, ran: ran)
+        public QEpisodicMemory(int maxSize, QRandom ran) : base(maxSize, ran: ran)
         {
         }
 
@@ -69,6 +69,10 @@ namespace HyperQ.MACE.Training
 
         public override void ReplayEpisode(HyperParams hp, Func<QMemoryCell<T, RT>, HyperParams, bool> callback)
         {
+            if (_EpisodicMemory.Count == 0)
+            {
+                return;
+            }
             foreach (QMemoryCell<T, RT> mem in _EpisodicMemory[_EpisodicMemory.Count - 1].Memory)
             {
                 callback(mem, hp);

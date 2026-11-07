@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.MemoryMappedFiles;
@@ -22,8 +23,9 @@ namespace HyperQ.Util
         private MemoryMappedFile _indexMap;
         private MemoryMappedViewAccessor _indexAccessor;
         private readonly FileStream _dataStream;
-        private readonly Dictionary<T, uint> _cache;
+        private readonly ConcurrentDictionary<T, uint> _cache;
         private readonly LinkedList<T> _lru;
+        private readonly object _lruLock = new object();
         private readonly int _cacheSize;
         private readonly IQKeySerializer<T> _keySerializer;
         private readonly ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
@@ -37,10 +39,20 @@ namespace HyperQ.Util
         private const int AccessRetryCount = 3;
         private const int AccessRetryDelayMs = 10;
         /// <summary>
-        /// List of the indices that are free when the keys are removed from the mapper. Default will
-        /// use the shared index repository.
+        /// Size of a new .idx file: 1,024 slots. The file doubles whenever a slot lands past its end.
         /// </summary>
-        private IndexRepo _indices = IndexRepo.Instance;
+        private const long InitialIndexCapacity = 8 * 1024;
+        /// <summary>
+        /// Header written at the start of every .dat file. Reserving this
+        /// space guarantees real key offsets are never zero, which lets slot
+        /// discovery on disk distinguish "never written" from a live entry.
+        /// </summary>
+        private static readonly byte[] DataFileHeader = new byte[] { (byte)'H', (byte)'Q', (byte)'D', (byte)'1', 0, 0, 0, 0 };
+        /// <summary>
+        /// Hands out the indexes and keeps the ones freed when keys are removed. The mapper's own unless one
+        /// was given to share.
+        /// </summary>
+        private IndexRepo _indices;
 
         /// <summary>
         /// Creates a new file backed index mapper.
@@ -53,9 +65,15 @@ namespace HyperQ.Util
         /// attempts to resolve a built-in serializer via <see cref="QKeySerializerFactory"/>.
         /// Pass an explicit instance for custom key types.
         /// </param>
+        /// <param name="repo">
+        /// The index repository to draw from, shared with the mappers whose indexes must not collide with
+        /// this one's (the levels of a <see cref="FileBackedHyperMapper{T}"/>). When null the mapper has a
+        /// repository of its own.
+        /// </param>
         public FileIndexMapper(string baseFile, int cacheSize = 1000, int flushThreshold = 10,
-            IQKeySerializer<T> keySerializer = null)
+            IQKeySerializer<T> keySerializer = null, IndexRepo repo = null)
         {
+            _indices = repo ?? new IndexRepo();
             _keySerializer = keySerializer ?? QKeySerializerFactory.GetDefault<T>();
             _basePath = baseFile;
             string dir = Path.GetDirectoryName(baseFile);
@@ -69,15 +87,23 @@ namespace HyperQ.Util
             try
             {
                 _dataStream = DataFileStreamFactory.Get(dataPath);
+                if (_dataStream.Length == 0)
+                {
+                    // Reserve the start of the data file with a header so the
+                    // first key never lands at offset zero. A slot value of
+                    // zero can then unambiguously mean "never written" when
+                    // the known slot count is recovered from disk.
+                    _dataStream.Write(DataFileHeader, 0, DataFileHeader.Length);
+                    _dataStream.Flush();
+                }
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Failed to create or open the memory mapped IDX file at {0} {1}", indexPath, ex.Message);
-                throw;
+                throw ex;
             }
             long len = new FileInfo(indexPath).Exists ? new FileInfo(indexPath).Length : 0;
-            long minCapacity = 8L * 1024L * 1024L; // enough room for ~1M index slots
-            long capacity = Math.Max(len == 0 ? 8 * 1024 : len, minCapacity);
+            long capacity = Math.Max(len, InitialIndexCapacity);
             try
             {
                 _indexMap = MemoryMappedFileFactory.Get(indexPath, capacity);
@@ -88,19 +114,19 @@ namespace HyperQ.Util
             catch (Exception ex)
             {
                 Console.WriteLine("Failed to create or open the memory mapped DAT file at {0} {1}", dataPath, ex.Message);
-                throw;
+                throw ex;
             }
-            // Only reset the shared index repository if the backing file already
-            // contains data.  Creating a new mapper with an empty file should not
-            // rewind the global index counter as that will cause index reuse
-            // across sibling mappers.
+            // Only move the index repository forward if the backing file already
+            // contains data. Creating a new mapper with an empty file must not
+            // rewind a repository it shares with sibling mappers, as that would
+            // reuse their indexes.
             uint next = (uint)Math.Min(_knownSlots, uint.MaxValue);
             if (next > 0 && next > _indices.Peek)
             {
                 _indices.RestoreAt(next);
             }
             _cacheSize = cacheSize;
-            _cache = new Dictionary<T, uint>();
+            _cache = new ConcurrentDictionary<T, uint>();
             _lru = new LinkedList<T>();
             _flushThreshold = flushThreshold;
         }
@@ -118,18 +144,24 @@ namespace HyperQ.Util
         private void AddToCache(T key, uint idx)
         {
             if (_cacheSize <= 0) return;
-            if (_cache.TryGetValue(key, out uint existing))
+            // The cache and the LRU list are touched from multiple threads
+            // (the GetOrAddIndex fast path runs without the reader/writer
+            // lock), so all mutations of the pair happen under _lruLock.
+            lock (_lruLock)
             {
-                _lru.Remove(key);
+                if (_cache.TryGetValue(key, out uint existing))
+                {
+                    _lru.Remove(key);
+                }
+                else if (_cache.Count >= _cacheSize)
+                {
+                    T oldest = _lru.First.Value;
+                    _lru.RemoveFirst();
+                    _cache.TryRemove(oldest, out _);
+                }
+                _cache[key] = idx;
+                _lru.AddLast(key);
             }
-            else if (_cache.Count >= _cacheSize)
-            {
-                T oldest = _lru.First.Value;
-                _lru.RemoveFirst();
-                _cache.Remove(oldest);
-            }
-            _cache[key] = idx;
-            _lru.AddLast(key);
         }
 
         private long ReadIndexOffset(uint index)
@@ -156,10 +188,7 @@ namespace HyperQ.Util
         private void WriteIndexOffset(uint index, long offset)
         {
             long position = (long)index * sizeof(long);
-            if (position >= _indexCapacity)
-            {
-                throw new IndexOutOfRangeException($"Index {index} exceeds index capacity {_indexCapacity / sizeof(long)}.");
-            }
+            EnsureIndexCapacity(position + sizeof(long));
             if (index >= _knownSlots)
             {
                 for (long i = _knownSlots; i < index; i++)
@@ -184,6 +213,30 @@ namespace HyperQ.Util
             _indexAccessor.Write(position, offset);
         }
 
+        /// <summary>
+        /// Doubles the .idx file until it holds <paramref name="needed"/> bytes. The indexes come from a repository
+        /// that other mappers may share, so a mapper's first slot can lie far past the start. Writers hold the write
+        /// lock, so no reader is using the view this replaces.
+        /// </summary>
+        private void EnsureIndexCapacity(long needed)
+        {
+            if (needed <= _indexCapacity)
+            {
+                return;
+            }
+            long capacity = _indexCapacity;
+            while (capacity < needed)
+            {
+                capacity *= 2;
+            }
+            MemoryMappedFile grown = MemoryMappedFileFactory.Get(_basePath + ".idx", capacity);
+            MemoryMappedViewAccessor old = _indexAccessor;
+            _indexAccessor = grown.CreateViewAccessor(0, capacity, MemoryMappedFileAccess.ReadWrite);
+            _indexMap = grown;
+            _indexCapacity = capacity;
+            old.Dispose();
+        }
+
         private uint GetScanUpperBound()
         {
             uint upper = _indices.Peek;
@@ -206,22 +259,20 @@ namespace HyperQ.Util
         private long DiscoverKnownSlots(long fileLength)
         {
             long slotCount = fileLength / sizeof(long);
-            if (slotCount <= 0 || _dataStream.Length == 0)
+            if (slotCount <= 0)
             {
                 return 0;
             }
-            for (long i = slotCount - 1; i > 0; i--)
+            for (long i = slotCount - 1; i >= 0; i--)
             {
                 long offset = _indexAccessor.ReadInt64(i * sizeof(long));
-                if (offset != 0L)
+                // Zero slots were never written and -1 slots are tombstones
+                // of removed keys. Every live entry holds a non-zero offset
+                // because the data file reserves a header.
+                if (offset != 0L && offset != -1L)
                 {
                     return i + 1;
                 }
-            }
-            long slotZero = _indexAccessor.ReadInt64(0);
-            if (slotZero == -1L || _dataStream.Length > 0)
-            {
-                return 1;
             }
             return 0;
         }
@@ -245,7 +296,7 @@ namespace HyperQ.Util
                         {
                             int len = new BinaryReader(_dataStream).ReadInt32();
                             byte[] data = new byte[len];
-                            _dataStream.ReadExactly(data);
+                            _dataStream.Read(data, 0, len);
                             using (var ms = new MemoryStream(data))
                             {
                                 T k = _keySerializer.Deserialize(ms);
@@ -266,6 +317,23 @@ namespace HyperQ.Util
             {
                 if (releaseLock)
                     _lock.ExitReadLock();
+            }
+            return uint.MaxValue;
+        }
+
+        /// <summary>
+        /// Returns the index assigned to the key while it is still queued in
+        /// _pending, or uint.MaxValue. The caller must hold _lock because the
+        /// pending queue mutates under the write lock.
+        /// </summary>
+        private uint FindPendingIndex(T key)
+        {
+            foreach (KeyValuePair<T, uint> kv in _pending)
+            {
+                if (EqualityComparer<T>.Default.Equals(kv.Key, key))
+                {
+                    return kv.Value;
+                }
             }
             return uint.MaxValue;
         }
@@ -323,8 +391,11 @@ namespace HyperQ.Util
         {
             if (_cache.TryGetValue(key, out uint idx))
             {
-                _lru.Remove(key);
-                _lru.AddLast(key);
+                lock (_lruLock)
+                {
+                    _lru.Remove(key);
+                    _lru.AddLast(key);
+                }
                 return idx;
             }
             idx = FindKeyInFile(key);
@@ -338,7 +409,23 @@ namespace HyperQ.Util
             _lock.EnterWriteLock();
             try
             {
-                idx = FindKeyInFile(key);
+                // Re-check before allocating: a concurrent caller may have
+                // inserted this key after our lookup, and pending keys are
+                // not yet visible to FindKeyInFile because they are not on
+                // disk. Without this check the same key can be allocated
+                // several slots.
+                if (_cache.TryGetValue(key, out uint raced))
+                {
+                    idx = raced;
+                }
+                else
+                {
+                    idx = FindPendingIndex(key);
+                    if (idx == uint.MaxValue)
+                    {
+                        idx = FindKeyInFile(key);
+                    }
+                }
                 if (idx == uint.MaxValue)
                 {
                     idx = _indices.Next;
@@ -385,7 +472,7 @@ namespace HyperQ.Util
                 _dataStream.Position = offset;
                 int len = new BinaryReader(_dataStream).ReadInt32();
                 byte[] data = new byte[len];
-                _dataStream.ReadExactly(data);
+                _dataStream.Read(data, 0, len);
                 using (var ms = new MemoryStream(data))
                 {
                     return _keySerializer.Deserialize(ms);
@@ -473,13 +560,16 @@ namespace HyperQ.Util
         {
             uint idx = uint.MaxValue;
             bool pending = false;
-            if (_cache.TryGetValue(key, out uint cachedIdx))
+            lock (_lruLock)
             {
-                idx = cachedIdx;
-                _cache.Remove(key);
-                _lru.Remove(key);
+                if (_cache.TryGetValue(key, out uint cachedIdx))
+                {
+                    idx = cachedIdx;
+                    _cache.TryRemove(key, out _);
+                    _lru.Remove(key);
+                }
             }
-            else
+            if (idx == uint.MaxValue)
             {
                 _lock.EnterWriteLock();
                 try
@@ -552,8 +642,7 @@ namespace HyperQ.Util
             {
                 _lock.ExitWriteLock();
             }
-            FileIndexMapper<T> clone = new FileIndexMapper<T>(newBase, _cacheSize, _flushThreshold);
-            clone.Repo = _indices;
+            FileIndexMapper<T> clone = new FileIndexMapper<T>(newBase, _cacheSize, _flushThreshold, repo: _indices);
             foreach (var ep in _remotes)
             {
                 clone.AddRemote(ep);
@@ -618,7 +707,11 @@ namespace HyperQ.Util
                                 _lock.EnterWriteLock();
                                 try
                                 {
-                                    if (FindKeyInFile(k) == uint.MaxValue)
+                                    // Same re-check as GetOrAddIndex: pending
+                                    // keys are invisible to FindKeyInFile.
+                                    if (!_cache.TryGetValue(k, out uint known)
+                                        && FindPendingIndex(k) == uint.MaxValue
+                                        && FindKeyInFile(k) == uint.MaxValue)
                                     {
                                         uint newIdx = _indices.Next;
                                         AddToCache(k, newIdx);

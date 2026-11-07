@@ -8,27 +8,17 @@ using System.Threading.Tasks;
 
 namespace HyperQ.Util
 {
+    /// <summary>
+    /// Hands out the indexes of one index space. Mappers whose indexes must not collide share one repository
+    /// (every level of a hyper mapper does); otherwise each mapper owns its own. There is no process-wide
+    /// repository.
+    /// </summary>
     [Serializable]
     public class IndexRepo
     {
         private List<uint> _FreeIndices = new List<uint>();
         private uint _nextIndex = 0;
         private uint _start = 0;
-
-        /// <summary>
-        /// The singleton that should be used for all mapping operations that are scoped together.
-        /// </summary>
-        public static IndexRepo Instance { get; private set; } = new IndexRepo();
-
-        /// <summary>
-        /// Creates a new singleton. Use this when the scope of the shared repo changes.
-        /// </summary>
-        /// <returns></returns>
-        public static IndexRepo NewSingleton()
-        {
-            Instance = new IndexRepo();
-            return (Instance);
-        }
 
         /// <summary>
         /// Constructor to make a new repo starting at the given index value.
@@ -47,6 +37,19 @@ namespace HyperQ.Util
         public void RestoreAt(uint next)
         {
             _nextIndex = next;
+        }
+
+        /// <summary>
+        /// Marks an index as taken, as a checkpoint restore does: it leaves the free list and the next index
+        /// moves past it.
+        /// </summary>
+        public void Reserve(uint idx)
+        {
+            _FreeIndices.Remove(idx);
+            if (_nextIndex <= idx)
+            {
+                _nextIndex = idx + 1;
+            }
         }
         /// <summary>
         /// Adjusts the next index by changing the start value of this repo. This only affects the next index

@@ -4,11 +4,13 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using HyperQ.Util;
+using System.IO;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.Learners
 {
     [Serializable]
-    public class DoubleHyperQ<T> : IHyperQ<T>
+    public class DoubleHyperQ<T> : IHyperQ<T>, ICheckpointable
     {
         public QAdvantage Advantage { get; private set; } = null;
         private QRandom _random;
@@ -45,6 +47,7 @@ namespace HyperQ.Learners
 
         public DoubleHyperQ(QActionSpace<int> actionSpace, Func<double> defaultValueAction = null, QRandom ran = null, Func<double,double,double> blendingFunction=null)
         {
+            FeatureGate.Require(HyperQFeatures.LearnerDoubleQ);
             ActionSpace = actionSpace;
             _Q1 = new SingleHyperQ<T>(actionSpace, defaultValueAction);
             _Q2 = new SingleHyperQ<T>(actionSpace, defaultValueAction);
@@ -62,7 +65,8 @@ namespace HyperQ.Learners
             {
                 _BlendingFunction = __default_blender;
             }
-            _random = ran ?? QRandom.Instance;
+            // Decides which table an update goes to.
+            _random = ran ?? actionSpace.Random;
             CreateDefaultActionArray();
             Advantage = new QAdvantage();
         }
@@ -85,64 +89,122 @@ namespace HyperQ.Learners
             _Q1.Link(_StateMap, ActionSpace);
             _Q2.Link(_StateMap, ActionSpace);
         }
+        /// <summary>
+        /// Returns the action-space indexes that either table has a value for in the given state.
+        /// </summary>
+        private SortedSet<uint> KnownActionIndexes(uint stateIndex)
+        {
+            SortedSet<uint> indexes = new SortedSet<uint>();
+            foreach (KeyValuePair<uint, double> kv in _Q1.KnownActionValuesAt(stateIndex))
+            {
+                indexes.Add(kv.Key);
+            }
+            foreach (KeyValuePair<uint, double> kv in _Q2.KnownActionValuesAt(stateIndex))
+            {
+                indexes.Add(kv.Key);
+            }
+            return indexes;
+        }
+
+        private double DefaultValue()
+        {
+            return DefaultValueFunc != null ? DefaultValueFunc() : 0.0;
+        }
+
+        private double Blend(double a1, double a2)
+        {
+            return _BlendingFunction != null ? _BlendingFunction(a1, a2) : 0.5 * (a1 + a2);
+        }
+
+        /// <summary>
+        /// Blends, per action index, the values the two tables hold for the state. An action only one table has
+        /// seen is blended with the default value, exactly as <see cref="GetValue"/> would report it, but without
+        /// writing that default into the other table.
+        /// </summary>
+        public virtual IEnumerable<KeyValuePair<uint, double>> KnownActionValues(QState<T> stateKey)
+        {
+            List<KeyValuePair<uint, double>> result = new List<KeyValuePair<uint, double>>();
+            if (!_StateMap.Known(stateKey.Enumerator))
+            {
+                return result;
+            }
+            uint ix = _StateMap[stateKey.Enumerator];
+            Dictionary<uint, double> q1 = new Dictionary<uint, double>();
+            foreach (KeyValuePair<uint, double> kv in _Q1.KnownActionValuesAt(ix))
+            {
+                q1[kv.Key] = kv.Value;
+            }
+            Dictionary<uint, double> q2 = new Dictionary<uint, double>();
+            foreach (KeyValuePair<uint, double> kv in _Q2.KnownActionValuesAt(ix))
+            {
+                q2[kv.Key] = kv.Value;
+            }
+            foreach (uint index in q1.Keys.Union(q2.Keys).OrderBy(i => i))
+            {
+                double a1;
+                double a2;
+                if (!q1.TryGetValue(index, out a1))
+                {
+                    a1 = DefaultValue();
+                }
+                if (!q2.TryGetValue(index, out a2))
+                {
+                    a2 = DefaultValue();
+                }
+                result.Add(new KeyValuePair<uint, double>(index, Blend(a1, a2)));
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Returns the blended values of the actions known in either table for the given state, ordered by
+        /// action index. The two tables fill in different orders, so the values are matched up by action
+        /// index rather than by position in each table's row.
+        /// </summary>
         public virtual double[] GetKnownActionArray(QState<T> stateKey)
         {
-            double[] r1 = null;
             if (!_StateMap.Known(stateKey.Enumerator))
             {
                 // Return a random array over all actions
-                r1 = _defaultActionArray;
+                double[] r1 = _defaultActionArray;
                 CreateDefaultActionArray();
                 return (r1);
             }
             uint state_idx = _StateMap[stateKey.Enumerator];
-            if (_Q1.IsKnownState(state_idx))
+            SortedSet<uint> indexes = KnownActionIndexes(state_idx);
+            double[] q = new double[indexes.Count];
+            int i = 0;
+            foreach (uint index in indexes)
             {
-                r1 = _Q1.GetKnownActionArray(stateKey);
-            }
-            double[] r2 = null;
-            if (_Q2.IsKnownState(state_idx))
-            {
-                r2 = _Q2.GetKnownActionArray(stateKey);
-            }
-            /*
-            if (r1 == null && r2 == null)
-            {
-                r1 = _defaultActionArray;
-                CreateDefaultActionArray();
-                return (r1);
-            }
-            */
-            if (r1 == null || r1.Length == 0)
-            {
-                return (r2);
-            }
-            if (r2 == null || r2.Length == 0)
-            {
-                return (r1);
-            }
-            double[] q = new double[Math.Max(r1.Length, r2.Length)];
-            for (int i = 0; i < Math.Max(r1.Length,r2.Length); i++) {
-                double a1 = _defaultActionArray[i];
-                double a2 = _defaultActionArray[i];
-                if (i < r1.Length)
-                {
-                    a1 = r1[i];
-                }
-                if (i < r2.Length)
-                {
-                    a2 = r2[i];
-                }
-                if (_BlendingFunction != null)
-                {
-                    q[i] = _BlendingFunction(a1,a2);
-                }
-                else
-                {
-                    q[i] = 0.5 * (a1+a2);
-                }
+                q[i++] = GetValue(stateKey, ActionSpace.FromIndex(index));
             }
             return (q);
+        }
+
+        /// <summary>
+        /// Returns the cached blended min/max for the state, computing it from the blended value of every
+        /// action known to either table when the cache has no entry. Returns null when nothing is known.
+        /// </summary>
+        private QArg<double> StateArgsFor(QState<T> stateKey, uint ix)
+        {
+            QArg<double> arg;
+            if (_StateArgs.TryGetValue(ix, out arg))
+            {
+                return arg;
+            }
+            SortedSet<uint> indexes = KnownActionIndexes(ix);
+            if (indexes.Count == 0)
+            {
+                return null;
+            }
+            arg = new QArg<double>();
+            foreach (uint index in indexes)
+            {
+                int action = ActionSpace.FromIndex(index);
+                arg.Set(GetValue(stateKey, action), action);
+            }
+            _StateArgs[ix] = arg;
+            return arg;
         }
 
         /// <summary>
@@ -183,7 +245,7 @@ namespace HyperQ.Learners
                         m[r, c] = _BlendingFunction(a1, a2);
                     }
                 }
-                return m1;
+                return m;
             }
         }
 
@@ -244,33 +306,10 @@ namespace HyperQ.Learners
         public virtual QAction ArgMax(QState<T> stateKey)
         {
             uint ix = _StateMap[stateKey.Enumerator];
-            if (_StateArgs.ContainsKey(ix))
-            {
-                QArg<double> arg = _StateArgs[ix];
-                return new QAction(arg.MaxIndex, arg.Max, ActionSpace.ToIndex(arg.MaxIndex));
-            }
-            double[] r = GetKnownActionArray(stateKey);
-            if (r == null || r.Length == 0)
+            QArg<double> arg = StateArgsFor(stateKey, ix);
+            if (arg == null)
                 return null;
-            double dmax = r[0];
-            uint imax = 0;
-            bool found = false;
-            for (uint i = 1; i < r.Length; i++)
-            {
-                if (r[i] > dmax)
-                {
-                    dmax = r[i];
-                    imax = i;
-                    found = true;
-                }
-            }
-            if (found)
-            {
-                int action = ActionSpace.FromIndex(imax);
-                _StateArgs[ix] = new QArg<double>(dmax, action);
-                return new QAction(action, dmax, imax);
-            }
-            return null;
+            return new QAction(arg.MaxIndex, arg.Max, ActionSpace.ToIndex(arg.MaxIndex));
         }
 
         /// <summary>
@@ -282,38 +321,15 @@ namespace HyperQ.Learners
         public virtual QAction ArgMin(QState<T> stateKey)
         {
             uint ix = _StateMap[stateKey.Enumerator];
-            if (_StateArgs.ContainsKey(ix))
-            {
-                QArg<double> arg = _StateArgs[ix];
-                return new QAction(arg.MinIndex, arg.Min, ActionSpace.ToIndex(arg.MinIndex));
-            }
-            double[] r = GetKnownActionArray(stateKey);
-            if (r == null || r.Length == 0)
+            QArg<double> arg = StateArgsFor(stateKey, ix);
+            if (arg == null)
                 return null;
-            double dmin = r[0];
-            uint imin = 0;
-            bool found = false;
-            for (uint i = 1; i < r.Length; i++)
-            {
-                if (r[i] < dmin)
-                {
-                    dmin = r[i];
-                    imin = i;
-                    found = true;
-                }
-            }
-            if (found)
-            {
-                int action = ActionSpace.FromIndex(imin);
-                _StateArgs[ix] = new QArg<double>(dmin, action);
-                return new QAction(action, dmin, imin);
-            }
-            return (null);
+            return new QAction(arg.MinIndex, arg.Min, ActionSpace.ToIndex(arg.MinIndex));
         }
 
         public virtual Q<QState<T>> Clone()
         {
-            DoubleHyperQ<T> c = new DoubleHyperQ<T>(ActionSpace, DefaultValueFunc);
+            DoubleHyperQ<T> c = new DoubleHyperQ<T>(ActionSpace, DefaultValueFunc, _random);
             c._Q1 = _Q1.Clone() as SingleHyperQ<T>;
             c._Q2 = _Q2.Clone() as SingleHyperQ<T>;
             return (c);
@@ -353,7 +369,7 @@ namespace HyperQ.Learners
 
         public virtual void MergeInto(Q<QState<T>> from, EvalMethodType methodType = EvalMethodType.Max)
         {
-            if (from is MappedQQ<T>)
+            if (from is DoubleHyperQ<T>)
             {
                 DoubleHyperQ<T> fromQ = (DoubleHyperQ<T>)from;
                 _Q1.MergeInto(fromQ._Q1, methodType);
@@ -368,36 +384,41 @@ namespace HyperQ.Learners
 
         public virtual void SetValue(QState<T> stateKey, int action, double v)
         {
-            double d = 0.0;
             AddState(stateKey);
             if (_WhichQ == 0)
             {
                 _Q1.SetValue(stateKey, action, v);
-                d = _Q2.GetValue(stateKey, action);
             }
             else
             {
                 _Q2.SetValue(stateKey, action, v);
-                d = _Q1.GetValue(stateKey, action);
             }
-            if (_BlendingFunction != null)
-            {
-                d = _BlendingFunction(d, v);
-            }
-            else
-            {
-                d = (v + d) / 2.0;
-            }
-            uint ix = _StateMap[stateKey.Enumerator];
-            if (!_StateArgs.ContainsKey(ix))
-            {
-                _StateArgs[ix] = new QArg<double>(d,action);
-            }
-            else
-            {
-                _StateArgs[ix].Set(d, action);
-            }
+            InvalidateStateArgs(stateKey);
             NextQ();
+        }
+
+        /// <summary>
+        /// Sets the value of (s, a) in both tables, so the blended value reads back as <paramref name="v"/> with
+        /// any blending function that returns v for two equal values, as the default mean does. SetValue writes
+        /// only the current table, so the blend still carries what the other table holds: next to the default 0,
+        /// v reads back as v / 2. Unlike SetValue this does not move on to the other table.
+        /// </summary>
+        public virtual void InitializeValue(QState<T> stateKey, int action, double v)
+        {
+            AddState(stateKey);
+            _Q1.SetValue(stateKey, action, v);
+            _Q2.SetValue(stateKey, action, v);
+            InvalidateStateArgs(stateKey);
+        }
+
+        /// <summary>
+        /// Drops the cached blended min/max of a state after one of the tables changed. Keeping the cache
+        /// in sync incrementally is not possible because a lowered maximum needs a full rescan, so the
+        /// extremes are recomputed lazily by the next ArgMax/ArgMin.
+        /// </summary>
+        private void InvalidateStateArgs(QState<T> stateKey)
+        {
+            _StateArgs.Remove(_StateMap[stateKey.Enumerator]);
         }
 
         /// <summary>
@@ -423,8 +444,10 @@ namespace HyperQ.Learners
             IHyperQ<T> q2 = qq[(_WhichQ + 1) % 2];
             double prime_v = q2.GetValue(sprime, aprime);
             double curr_v = q1.GetValue(s, a);
-            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage);
+            double baseline = QUpdateCore.Baseline(q1.GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             q1.SetValue(s, a, new_v);
+            InvalidateStateArgs(s);
             return new_v;
         }
         public virtual double OffPolicyUpdate(QState<T> s, int a, QState<T> sprime, double r, HyperParams hp, EvalMethodType evalType = EvalMethodType.Max)
@@ -440,8 +463,10 @@ namespace HyperQ.Learners
             int aprime = QUpdateCore.SelectGreedyAction(sprime, a, evalType, q1.ArgMax, q1.ArgMin);
             double prime_v = q2.GetValue(sprime, aprime);
             double curr_v = q1.GetValue(s, a);
-            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage);
+            double baseline = QUpdateCore.Baseline(q1.GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             q1.SetValue(s, a, new_v);
+            InvalidateStateArgs(s);
             return new_v;
         }
         #endregion
@@ -522,6 +547,29 @@ namespace HyperQ.Learners
             {
                 SetValue(state, action, value);
             }
+        }
+
+        // ── ICheckpointable ──
+
+        public int CheckpointVersion { get { return 1; } }
+
+        /// <summary>The two tables share one state map, which each table's checkpoint carries and restores.</summary>
+        public virtual void SaveCheckpoint(BinaryWriter writer)
+        {
+            writer.Write(CheckpointVersion);
+            writer.Write(_WhichQ);
+            _Q1.SaveCheckpoint(writer);
+            _Q2.SaveCheckpoint(writer);
+        }
+
+        public virtual void LoadCheckpoint(BinaryReader reader)
+        {
+            int version = reader.ReadInt32();
+            _WhichQ = reader.ReadInt32();
+            _Q1.LoadCheckpoint(reader);
+            _Q2.LoadCheckpoint(reader);
+            _StateArgs.Clear();
+            CreateDefaultActionArray();
         }
     }
 }

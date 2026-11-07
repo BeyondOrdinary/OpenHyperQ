@@ -94,8 +94,7 @@ namespace HyperQ.Util
         }
 
         /// <summary>
-        /// Returns the probability of the given index, which is the average exponential
-        /// logit value.
+        /// Returns the probability of the given index: the softmax of the logits.
         /// </summary>
         /// <param name="idx"></param>
         /// <returns></returns>
@@ -103,16 +102,22 @@ namespace HyperQ.Util
         {
             return _exps[idx];
         }
+
         /// <summary>
-        /// Set/get the logit value for the given index. Setting the logit value
-        /// will update the exponential probabilities and running average of exponents.
+        /// Gets or sets the logit for the given index (0 when it has never been set). Setting a logit updates
+        /// the probabilities, which are read with <see cref="Probability"/>. The indexer reads and writes the
+        /// same quantity, so <c>rl[i] += delta</c> is a step on the logit. (It used to read back the
+        /// probability, so that step set the logit to the probability plus delta, which kept the policy-gradient
+        /// selectors from learning from 2026-02 until 2026-09-27.)
         /// </summary>
         /// <param name="idx">The index to query/set</param>
         /// <returns></returns>
         public double this[int idx]
         {
-            get {
-                return Probability(idx); 
+            get
+            {
+                double v;
+                return _logits.TryGetValue(idx, out v) ? v : 0.0;
             }
             set
             {
@@ -132,21 +137,20 @@ namespace HyperQ.Util
                             _maxLogitIndex = i;
                         }
                     }
+                    // Plain softmax. Subtracting the maximum logit is all the numerical protection the
+                    // exponent needs: it can never overflow. (An earlier version also divided the difference
+                    // by |max logit| whenever that exceeded 1, i.e. a temperature equal to the largest logit,
+                    // which made the distribution flatter the more a policy learned and capped the best
+                    // action at roughly even odds.)
                     foreach (int i in _logits.Keys)
                     {
-                        double exp = _logits[i] - _maxLogit;
-                        if (Math.Abs(_maxLogit) > 1.0)
-                            exp /= Math.Abs(_maxLogit);
-                        _exps[i] = Math.Exp(exp);
+                        _exps[i] = Math.Exp(_logits[i] - _maxLogit);
                     }
                 }
                 else
                 {
                     // Ok to set the value here because the max is not changing
-                    double exp = value - _maxLogit;
-                    if (Math.Abs(_maxLogit) > 1.0) // Not normalized probabilities
-                        exp /= Math.Abs(_maxLogit);
-                    _exps[idx] = Math.Exp(exp);
+                    _exps[idx] = Math.Exp(value - _maxLogit);
                 }
                 _dirty_priors = true;
             }

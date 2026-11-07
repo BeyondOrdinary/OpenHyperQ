@@ -22,7 +22,7 @@ Use it when:
 - you want checkpoint support today.
 
 ```csharp
-var actions = new QOrdinalActionSpace(QRandom.Instance, 4);
+var actions = new QOrdinalActionSpace(new QRandom(0), 4);
 var q = new ClassicQ(actions, defaultValueFunc: () => 0.0);
 ```
 
@@ -39,7 +39,7 @@ Use it when:
 - you want the learner to grow with visited states.
 
 ```csharp
-var actions = new QOrdinalActionSpace(QRandom.Instance, 4);
+var actions = new QOrdinalActionSpace(new QRandom(0), 4);
 var q = new MappedQ<string>(actions);
 ```
 
@@ -100,6 +100,10 @@ Use it when:
 
 Layered learners are best treated as advanced APIs until more public examples are added.
 
+For inspection, `KnownStates()` lists the complete states the learner has seen, `AsMatrix` returns one row per such state and one column per action index (the finest layer that has learned an action supplies its value, coarser layers fill in the rest), and `KnownActionValues(state)`, available on every `IHyperQ<T>`, enumerates the learned `(action index, value)` pairs without materializing defaults. None of these modify the learner.
+
+With `LayerUpdateMode.CoarseToFineLayerUpdates`, a state that is new to a layer starts at the values its parent, the next coarser layer's slice of the state, has learned for the same actions. This holds in every layer, the finest included, and for single-Q and double-Q layers alike. The warm start writes through `InitializeValue`, which every `IHyperQ<T>` has. It sets a value in every estimate the learner keeps, so `GetValue` reports it afterwards. `SetValue` may write a single estimate: `DoubleHyperQ<T>` writes its current table and moves on to the other one, so a value set that way reads back blended with what the other table holds.
+
 ## Generator Helpers
 
 `SingleQGenerator<T>` and `DoubleQGenerator<T>` create learners for layered configurations. They are mainly useful with `LayeredHyperQ<T>` and sample runner code.
@@ -124,7 +128,7 @@ Available concrete learners include:
 - `MultiHeadHyperQQ<T>`
 
 ```csharp
-var actions = new QOrdinalActionSpace(QRandom.Instance, 4);
+var actions = new QOrdinalActionSpace(new QRandom(0), 4);
 var scalarizer = new LinearScalarizer(new[] { 0.7, 0.3 });
 var q = new MultiHeadMappedQ<decimal>(
     actions,

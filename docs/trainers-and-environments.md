@@ -49,7 +49,7 @@ Use `IPvEEnv<T>` when exactly one action is chosen per step. Use `IMACEPvEEnv<T,
 `PvESARSATrainer<T>` trains one Q learner in one environment. It supports on-policy SARSA and off-policy Q-learning style updates.
 
 ```csharp
-QRandom random = QRandom.Instance.Seed(0);
+QRandom random = new QRandom(0);
 var actions = new QOrdinalActionSpace(random, 4);
 var q = new MappedQ<decimal>(actions);
 var selector = new eGreedyActionSelector<decimal>(actions);
@@ -102,7 +102,7 @@ Warmup is useful when the Q table starts empty and early exploration matters.
 Replay memory stores experienced transitions and replays them through the same update path.
 
 ```csharp
-trainer.EnableMemory(new QMemory<decimal>(capacity: 10000));
+trainer.EnableMemory(new QMemory<decimal>(capacity: 10000, random: random));
 trainer.Reminisce(hp, count: 128);
 ```
 
@@ -113,7 +113,16 @@ Available memory types include:
 - `QEpisodicMemory<T>`: remembers episode boundaries;
 - `QEpisodicNegPosMemory<T>`: combines episodic and negative/positive behavior.
 
-The trainer also supports `Obsess(...)`, which replays the most recent episode when the memory type supports it.
+These are sibling types with no conversions between them. A variable that may hold any of them is declared as the shared base type, `QMemory<T, ScalarReward>`, which is also what `EnableMemory` takes.
+
+The negative/positive memories have two opt-in settings, both off by default:
+
+- `KeepExtremes`: each sorted memory keeps its most extreme entries, the most negative and the most positive, and a full one drops its mildest entry. By default a full memory drops its most extreme or its mildest entry with even odds (`CullLIFOLikelihood`), so over time both settle around their median reward.
+- `ChooseListPerDraw`: `Playback` chooses the negative, positive or recent memory for each draw instead of once per call.
+
+Every memory has `ReplayBackward`, which replays episodes last step first, in `Obsess` and in the episodic memories' replay, so one pass carries an outcome back along the whole episode. The episodic memories have `CountSteps`, which makes `Reminisce`'s count a number of steps rather than episodes.
+
+The trainer also supports `Obsess(...)`, which replays the most recent episode (the steps remembered since the memory's `StartEpisode`) from any of these memory types.
 
 ## Dyna
 
@@ -124,24 +133,19 @@ var dyna = new DynaState<decimal>(iterations: 100, capacity: 0);
 trainer.EnableDyna(dyna, freq: 0.5, mode: DynaSweepMode.Uniform);
 ```
 
+On each training step the trainer updates the model with probability 0.8 and, with probability `freq`, makes `iterations` planning updates from it. Off-policy trainers bootstrap a planning update from the best next action, on-policy trainers from a random one.
+
 `DynaSweepMode.Prioritized` ranks replay by TD error. Start with uniform Dyna unless you specifically need prioritized planning.
 
-## Advantage Modes
+## Advantage Signal
 
-The trainer can pass advantage estimates into selectors that use `ApplyAdvantage(...)`, such as policy-gradient selectors.
+Selectors that implement `ApplyAdvantage(...)`, such as the policy-gradient selectors, are called by the trainer after every Q update with the advantage of the action just taken.
 
-```csharp
-trainer.AdvantageEstimation = AdvantageMode.OneStep;
-```
+Every Q update records an advantage for its step, `A(s,a) = Q(s,a) - V(s)`, where `Q(s,a)` is the value just written and `V(s)` is the mean of the state's action row. The baseline depends only on the state, which keeps the policy gradient unbiased and, unlike a plain TD error, keeps the signal alive after the critic has converged. `Advantage[i]` returns the step's advantage divided by the root mean square of the episode's advantages so far; it is not centred, because the sign carries the information.
 
-Available modes:
+There is no generalized advantage estimation (GAE) in the trainer. GAE recovers action values from a state-value critic and a noisy trajectory; a Q table already holds the action values, so the direct advantage above is both simpler and lower variance. `HyperParams.Lambda` is the one residual of that idea: it is reserved for a future GAE-style critic, is not read by any learner or trainer, and is kept so the constructors and the checkpoint layout stay stable.
 
-- `OneStep`: applies one-step TD error during each step;
-- `PostEpisodeGAE`: applies one-step TD during the episode and generalized advantage after the episode;
-- `EligibilityTraceGAE`: applies an online eligibility trace;
-- `DeferredGAE`: applies full GAE after the episode.
-
-For normal Q learners with epsilon-greedy selection, the default `OneStep` is sufficient.
+For normal Q learners with epsilon-greedy selection the advantage is recorded but never used.
 
 ## MACEPvESARSATrainer<T, RT>
 
@@ -150,7 +154,7 @@ MACE stands for Multi-Action Collective Environment. A MACE trainer owns multipl
 ```csharp
 using HyperQ.MACE.Training;
 
-var trainer = new MACEPvESARSATrainer<QState<decimal>>();
+var trainer = new MACEPvESARSATrainer<QState<decimal>>(random);
 
 trainer.Add(
     new MappedQ<QState<decimal>>(moveActions),
@@ -197,7 +201,7 @@ If you are building a new sample for OSS, start with `PvESARSATrainer<T>` unless
 using HyperQ.MultiHead;
 using HyperQ.MultiHead.Training;
 
-var actions = new QOrdinalActionSpace(QRandom.Instance, 4);
+var actions = new QOrdinalActionSpace(new QRandom(0), 4);
 var scalarizer = new LinearScalarizer(new[] { 0.7, 0.3 });
 var q = new MultiHeadMappedQ<decimal>(
     actions,

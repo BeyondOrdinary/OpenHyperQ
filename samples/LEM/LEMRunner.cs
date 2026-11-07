@@ -17,11 +17,11 @@ namespace LEM
         public QQLEMRunner(int numepisodes, HyperParams h = null) : base(numepisodes,h) { }
         protected override Q<decimal> CreateLearner(QActionSpace<int> actionSpace)
         {
-            return new MappedQQ<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction, ran: QRandom.Instance);
+            return new MappedQQ<decimal>(actionSpace, _Random.DefaultRandomAction, ran: _Random);
         }
         protected override LEMBaseGameEnv CreateWorld()
         {
-            LEMGameEnv world = new LEMGameEnv(ran: QRandom.Instance.Ran, quiet: Quiet, stepduration: StepDuration);
+            LEMGameEnv world = new LEMGameEnv(ran: _Random.Ran, quiet: Quiet, stepduration: StepDuration);
             world.Metrics = new EnvMetrics(false);
             return (world);
         }
@@ -31,11 +31,11 @@ namespace LEM
         public HyperQQLEMRunner(int numepisodes, HyperParams h = null) : base(numepisodes,h) { }
         protected override Q<QState<decimal>> CreateLearner(QActionSpace<int> actionSpace)
         {
-            return new DoubleHyperQ<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction, ran: QRandom.Instance);
+            return new DoubleHyperQ<decimal>(actionSpace, _Random.DefaultRandomAction, ran: _Random);
         }
         protected override LEMBaseGameEnv CreateWorld()
         {
-            LEMHyperGameEnv world = new LEMHyperGameEnv(ran: QRandom.Instance.Ran, quiet: Quiet, stepduration: StepDuration);
+            LEMHyperGameEnv world = new LEMHyperGameEnv(ran: _Random.Ran, quiet: Quiet, stepduration: StepDuration);
             world.Metrics = new EnvMetrics(false);
             return (world);
         }
@@ -45,11 +45,11 @@ namespace LEM
         public QLEMRunner(int numepisodes, HyperParams h = null) : base(numepisodes,h) { }
         protected override Q<decimal> CreateLearner(QActionSpace<int> actionSpace)
         {
-            return new MappedQ<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction);
+            return new MappedQ<decimal>(actionSpace, _Random.DefaultRandomAction);
         }
         protected override LEMBaseGameEnv CreateWorld()
         {
-            LEMGameEnv world = new LEMGameEnv(ran: QRandom.Instance.Ran, quiet: Quiet, stepduration: StepDuration);
+            LEMGameEnv world = new LEMGameEnv(ran: _Random.Ran, quiet: Quiet, stepduration: StepDuration);
             world.Metrics = new EnvMetrics(false);
             return (world);
         }
@@ -59,11 +59,11 @@ namespace LEM
         public HyperQLEMRunner(int numepisodes, HyperParams h = null) : base(numepisodes,h) { }
         protected override Q<QState<decimal>> CreateLearner(QActionSpace<int> actionSpace)
         {
-            return new SingleHyperQ<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction);
+            return new SingleHyperQ<decimal>(actionSpace, _Random.DefaultRandomAction);
         }
         protected override LEMBaseGameEnv CreateWorld()
         {
-            LEMHyperGameEnv world = new LEMHyperGameEnv(ran: QRandom.Instance.Ran, quiet: Quiet, stepduration: StepDuration);
+            LEMHyperGameEnv world = new LEMHyperGameEnv(ran: _Random.Ran, quiet: Quiet, stepduration: StepDuration);
             world.Metrics = new EnvMetrics(false);
             return (world);
         }
@@ -73,12 +73,12 @@ namespace LEM
         public LayeredHyperQLEMRunner(int numepisodes, HyperParams h = null) : base(numepisodes,h) { }
         protected override Q<QState<decimal>> CreateLearner(QActionSpace<int> actionSpace)
         {
-            SingleQGenerator<decimal> g = new SingleQGenerator<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction);
-            return new LayeredHyperQ<decimal>(g.HyperQGenerator, actionSpace, QRandom.Instance.DefaultRandomAction);
+            SingleQGenerator<decimal> g = new SingleQGenerator<decimal>(actionSpace, _Random.DefaultRandomAction);
+            return new LayeredHyperQ<decimal>(g.HyperQGenerator, actionSpace, _Random.DefaultRandomAction);
         }
         protected override LEMBaseGameEnv CreateWorld()
         {
-            LEMHyperGameEnv world = new LEMHyperGameEnv(ran: QRandom.Instance.Ran, quiet: Quiet, stepduration: StepDuration);
+            LEMHyperGameEnv world = new LEMHyperGameEnv(ran: _Random.Ran, quiet: Quiet, stepduration: StepDuration);
             world.Metrics = new EnvMetrics(false);
             return (world);
         }
@@ -88,12 +88,12 @@ namespace LEM
         public LayeredHyperQQLEMRunner(int numepisodes, HyperParams h = null) : base(numepisodes,h) { }
         protected override Q<QState<decimal>> CreateLearner(QActionSpace<int> actionSpace)
         {
-            DoubleQGenerator<decimal> g = new DoubleQGenerator<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction, ran: QRandom.Instance);
-            return new LayeredHyperQ<decimal>(g.HyperGenerator, actionSpace, QRandom.Instance.DefaultRandomAction);
+            DoubleQGenerator<decimal> g = new DoubleQGenerator<decimal>(actionSpace, _Random.DefaultRandomAction, ran: _Random);
+            return new LayeredHyperQ<decimal>(g.HyperGenerator, actionSpace, _Random.DefaultRandomAction);
         }
         protected override LEMBaseGameEnv CreateWorld()
         {
-            LEMHyperGameEnv world = new LEMHyperGameEnv(ran: QRandom.Instance.Ran, quiet: Quiet, stepduration: StepDuration);
+            LEMHyperGameEnv world = new LEMHyperGameEnv(ran: _Random.Ran, quiet: Quiet, stepduration: StepDuration);
             world.Metrics = new EnvMetrics(false);
             return (world);
         }
@@ -238,10 +238,15 @@ namespace LEM
         public HyperParams Hypers { get; set; } = new HyperParams(g: 0.997, e: .5, a: 0.7, edecay: 0.999991, adecay: 0.999991, min_epsilon: 0.05, min_alpha: 0.1, tau: 0.95);
         public PvESARSATrainer<T> Model { get; private set; }
 
+        /// <summary>
+        /// The run's random source: the action spaces, learners, world, trainer and memory draw from it, so a
+        /// run is reproducible from this seed.
+        /// </summary>
+        protected readonly QRandom _Random = new QRandom(903387237);
+
         public LEMRunner(int numepisodes, HyperParams h = null)
         {
             NumEpisodes = numepisodes;
-            QRandom.Instance.Seed(903387237);
             if (h != null)
             {
                 Hypers = h;
@@ -335,52 +340,53 @@ namespace LEM
                     Console.WriteLine("  output step = {0}", args.epStep);
                     Console.WriteLine("  warmup = {0}", args.warmup_episodes);
                     Console.WriteLine("  memory = {0} {1}", args.memory_size, args.use_negpos_memory ? "neg/pos" : "all");
-                    Console.WriteLine("  dyna = {0} @ {1:F3}", args.dyna_size, args.dyna_freq);
+                    Console.WriteLine("  dyna = {0} @ {1:F3}", args.dyna_size < 0 ? "full" : args.dyna_size.ToString(), args.dyna_freq);
                     if (World == null)
                     {
                         World = CreateWorld();
                         World.Reset();
                         Console.WriteLine("Created the simulation world.");
                     }
-                    LEMActionSpace ras = new LEMActionSpace(QRandom.Instance, (int)World.NumActions);
+                    LEMActionSpace ras = new LEMActionSpace(_Random, (int)World.NumActions);
                     if (_Q == null)
                     {
                         _Q = CreateLearner(ras);
                         Console.WriteLine("Created the Q learner.");
                     }
+                    ApplyPendingLoad();
                     IPvEEnv<T> env = (IPvEEnv<T>)World;
                     if (args.actionModel == ActionSelectionModel.eGreedy)
                         selector = new eGreedyActionSelector<T>(ras);
                     else if (args.actionModel == ActionSelectionModel.PolicyGradient)
-                        selector = new PolicyGradientActionSelector<T>(ras);
+                        selector = new PolicyGradientActionSelector<T>(_Q, ras);
                     else if (args.actionModel == ActionSelectionModel.GRPO_KL)
-                        selector = new GRPOWithKLPenaltyActionSelector<T>(ras, klCoef: 0.1);
+                        selector = new GRPOWithKLPenaltyActionSelector<T>(_Q, ras, klCoef: 0.1);
                     else if (args.actionModel == ActionSelectionModel.SoftMax)
-                        selector = new PolicyGradientWithSoftmaxActionSelector<T>(ras);
+                        selector = new PolicyGradientWithSoftmaxActionSelector<T>(_Q, ras);
                     else if (args.actionModel == ActionSelectionModel.SoftMax_KL)
-                        selector = new SoftmaxWithKLPenaltyActionSelector<T>(ras, klCoef: 0.1);
-                    PvESARSATrainer<T> s = new PvESARSATrainer<T>(_Q, evalType, selector, QRandom.Instance);
+                        selector = new SoftmaxWithKLPenaltyActionSelector<T>(_Q, ras, klCoef: 0.1);
+                    PvESARSATrainer<T> s = new PvESARSATrainer<T>(_Q, evalType, selector, _Random);
                     if (args.memory_size > 0)
                     {
                         QMemory<T, HyperQ.Util.ScalarReward> mem = null;
                         if (args.episodic)
                         {
                             if (args.use_negpos_memory)
-                                mem = new QEpisodicNegPosMemory<T>(args.memory_size, QRandom.Instance);
+                                mem = new QEpisodicNegPosMemory<T>(args.memory_size, _Random);
                             else
-                                mem = new QEpisodicMemory<T>(args.memory_size, QRandom.Instance);
+                                mem = new QEpisodicMemory<T>(args.memory_size, _Random);
                         }
                         else
                         {
                             if (args.use_negpos_memory)
-                                mem = new QNegPosMemory<T>(args.memory_size, QRandom.Instance);
+                                mem = new QNegPosMemory<T>(args.memory_size, _Random);
                             else
-                                mem = new QMemory<T>(args.memory_size, QRandom.Instance);
+                                mem = new QMemory<T>(args.memory_size, _Random);
                         }
                         s.EnableMemory(mem);
                     }
-                    if (args.dyna_size > 0)
-                        s.EnableDyna(new DynaState<T>(args.dyna_iters, args.dyna_size), args.dyna_freq);
+                    if (args.dyna_size != 0)
+                        s.EnableDyna(new DynaState<T>(args.dyna_iters, Math.Max(0, args.dyna_size)), args.dyna_freq);
                     Dictionary<LanderStatus, int> statusCount = new Dictionary<LanderStatus, int>();
                     statusCount[LanderStatus.Crashed] = 0;
                     statusCount[LanderStatus.FreeFall] = 0;
@@ -558,14 +564,60 @@ namespace LEM
             return selector;
         }
 
+        private string _PendingLoad = null;
+
+        /// <summary>
+        /// Saves the learner as a HyperQ checkpoint. A name ending in .gz is written compressed; any other name
+        /// gets .gz appended.
+        /// </summary>
         public void Save(string fname)
         {
-            throw new NotSupportedException("LEM checkpoints need a typed .NET 10 serializer. BinaryFormatter has been removed from the OSS build.");
+            ICheckpointable learner = _Q as ICheckpointable;
+            if (learner == null)
+            {
+                Console.WriteLine("Nothing to save: the learner has not been created yet or does not support checkpoints.");
+                return;
+            }
+            string path = fname.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) ? fname : fname + ".gz";
+            LearnerCheckpoint.SaveFile(path, learner);
+            Console.WriteLine("Saved the checkpoint of the Q learner to {0}", path);
         }
 
+        /// <summary>
+        /// Schedules a checkpoint to be restored into the learner once Run has created it from the options: a
+        /// checkpoint holds learned state, not the learner configuration.
+        /// </summary>
         public void Load(string fname)
         {
-            throw new NotSupportedException("LEM checkpoints need a typed .NET 10 serializer. BinaryFormatter has been removed from the OSS build.");
+            if (!File.Exists(fname) && File.Exists(fname + ".gz"))
+            {
+                fname += ".gz";
+            }
+            if (!File.Exists(fname))
+            {
+                Console.WriteLine("Checkpoint {0} does not exist. Ignoring.", fname);
+                return;
+            }
+            _PendingLoad = fname;
+        }
+
+        private void ApplyPendingLoad()
+        {
+            ICheckpointable learner = _Q as ICheckpointable;
+            if (_PendingLoad == null || learner == null)
+            {
+                return;
+            }
+            try
+            {
+                LearnerCheckpoint.LoadFile(_PendingLoad, learner);
+                Console.WriteLine("Loaded the Q state from {0}", _PendingLoad);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("OOPS, {0} could not be loaded into the configured learner ({1}). Ignoring.", _PendingLoad, ex.Message);
+            }
+            _PendingLoad = null;
         }
 
         public void Run(ProgramArgs args)

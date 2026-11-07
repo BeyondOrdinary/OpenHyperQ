@@ -5,6 +5,8 @@ using System.Text;
 using System.Threading.Tasks;
 using static System.Collections.Specialized.BitVector32;
 using HyperQ.Util;
+using System.IO;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.Learners
 {
@@ -28,7 +30,7 @@ namespace HyperQ.Learners
     /// the state vector.
     /// </summary>
     [Serializable]
-    public class LayeredHyperQ<T> : IHyperQ<T>
+    public class LayeredHyperQ<T> : IHyperQ<T>, ICheckpointable
     {
         private QActionSpace<int> _actionSpace;
         public QActionSpace<int> ActionSpace
@@ -39,6 +41,8 @@ namespace HyperQ.Learners
             }
         }
         private List<IHyperQ<T>> _Layers = new List<IHyperQ<T>>();
+        /// <summary>The layers, coarsest first: layer i holds the prefixes of length i + 1. They are created as longer states arrive.</summary>
+        internal IReadOnlyList<IHyperQ<T>> LayerList { get { return _Layers; } }
         private Func<IHyperQ<T>> _Generator = null;
         private bool _GlobalQuery = false;
         /// <summary>
@@ -50,6 +54,11 @@ namespace HyperQ.Learners
         /// </summary>
         public Func<double> DefaultValueFunc { get; set; } = () => 0.0;
         public string Label { get; set; } = "LayeredHyperQ";
+        /// <summary>
+        /// Registry of the complete states this learner has seen (and the shared index space of double-Q
+        /// layers). Like every mapper it draws its indexes from a repository of its own, so registering a
+        /// state here never disturbs the index sequence of the layers.
+        /// </summary>
         private MemoryBackedHyperMapper<T> _StateMap = new MemoryBackedHyperMapper<T>();
         public virtual bool RequiresIndexRepositoryLinking { get { return false; } }
         public QAdvantage Advantage
@@ -64,6 +73,7 @@ namespace HyperQ.Learners
 
         public LayeredHyperQ(Func<IHyperQ<T>> qGenerator, QActionSpace<int> actionSpace, Func<double> valueFunc = null, LayerUpdateMode updateMode = LayerUpdateMode.ScaledLayerUpdates)
         {
+            FeatureGate.Require(HyperQFeatures.LearnerLayered);
             _actionSpace = actionSpace;
             _Generator = qGenerator;
             UpdateMode = updateMode;
@@ -72,7 +82,11 @@ namespace HyperQ.Learners
                 DefaultValueFunc = valueFunc;
             }
         }
-        public virtual Tuple<uint, uint> Shape { get { return new Tuple<uint, uint>(_StateMap.MappingCount, ActionSpace.NumberOfKnownActions); } }
+        /// <summary>
+        /// Item1 is the number of complete states (one element per layer) the learner has seen, Item2 the
+        /// number of known actions.
+        /// </summary>
+        public virtual Tuple<uint, uint> Shape { get { return new Tuple<uint, uint>(_StateMap.MappingCountAtDepth(_Layers.Count), ActionSpace.NumberOfKnownActions); } }
         public virtual uint MapState(QState<T> stateKey)
         {
             return _StateMap[stateKey.Enumerator];
@@ -99,48 +113,139 @@ namespace HyperQ.Learners
             } 
         }
 
+        /// <summary>
+        /// Returns the Q matrix of the complete states the learner has seen: one row per state, in the order
+        /// returned by <see cref="KnownStates"/>, and one column per action-space index. A cell holds the value
+        /// of the finest layer that has learned that action in that state, so coarser layers fill in the actions
+        /// the finest layer has not tried yet, and the default value where no layer has seen the action.
+        /// Building the matrix does not modify any layer.
+        /// </summary>
         public virtual double[,] AsMatrix
         {
             get
             {
-                // TODO
-                throw (new NotImplementedException());
+                uint maxActions = ActionSpace.MaximumNumberOfActions;
+                List<QState<T>> states = KnownStates();
+                double[,] m = new double[states.Count, maxActions];
+                bool[] filled = new bool[maxActions];
+                for (int r = 0; r < states.Count; r++)
+                {
+                    Array.Clear(filled, 0, filled.Length);
+                    foreach (KeyValuePair<uint, double> kv in KnownActionValues(states[r]))
+                    {
+                        if (kv.Key < maxActions)
+                        {
+                            m[r, kv.Key] = kv.Value;
+                            filled[kv.Key] = true;
+                        }
+                    }
+                    for (uint i = 0; i < maxActions; i++)
+                    {
+                        if (!filled[i])
+                        {
+                            m[r, i] = DefaultValueFunc != null ? DefaultValueFunc() : 0.0;
+                        }
+                    }
+                }
+                return m;
+            }
+        }
+
+        /// <summary>
+        /// Returns the complete states (one element per layer) the learner has seen, ordered by state index.
+        /// This is the row order of <see cref="AsMatrix"/>.
+        /// </summary>
+        public virtual List<QState<T>> KnownStates()
+        {
+            int depth = _Layers.Count;
+            List<QState<T>> states = new List<QState<T>>();
+            if (depth == 0)
+            {
+                return states;
+            }
+            foreach (KeyValuePair<QState<T>, uint> kv in _StateMap.Mappings().Where(kv => kv.Key.Count == depth).OrderBy(kv => kv.Value))
+            {
+                states.Add(kv.Key);
+            }
+            return states;
+        }
+
+        /// <summary>
+        /// Per action index, the value of the finest layer that has learned the action for (its slice of) the
+        /// state; coarser layers only contribute the actions the finer layers have not seen. Nothing is written.
+        /// </summary>
+        public virtual IEnumerable<KeyValuePair<uint, double>> KnownActionValues(QState<T> stateKey)
+        {
+            Dictionary<uint, double> values = new Dictionary<uint, double>();
+            int depth = Math.Min(stateKey.Count, _Layers.Count);
+            for (int i = depth - 1; i >= 0; i--)
+            {
+                QState<T> slice = stateKey.Slice(i + 1);
+                if (!_Layers[i].IsKnownState(slice))
+                {
+                    continue;
+                }
+                foreach (KeyValuePair<uint, double> kv in _Layers[i].KnownActionValues(slice))
+                {
+                    if (!values.ContainsKey(kv.Key))
+                    {
+                        values[kv.Key] = kv.Value;
+                    }
+                }
+            }
+            return values.OrderBy(kv => kv.Key).ToList();
+        }
+
+        /// <summary>
+        /// Creates layers until there is one per state element. New layers are linked to the shared state map
+        /// when the layer type needs it (double-Q layers keep both tables on one index space).
+        /// </summary>
+        private void EnsureLayers(int count)
+        {
+            while (count > _Layers.Count)
+            {
+                IHyperQ<T> g = _Generator();
+                _Layers.Add(g);
+                if (g.RequiresIndexRepositoryLinking)
+                    g.Link(_StateMap, ActionSpace);
+                g.Label = string.Format("L{0}", _Layers.Count);
             }
         }
 
         public uint AddState(QState<T> stateKey)
         {
             uint r = 0;
-            while (stateKey.Count > _Layers.Count)
+            EnsureLayers(stateKey.Count);
+            // CoarseToFine warm-starts every layer whose slice of the state is new. Ask the layers before the
+            // complete state is registered below: layers linked to the shared state map (double-Q layers) answer
+            // from that map, so the finest of them would otherwise always report the state as known.
+            bool[] isNew = null;
+            if (UpdateMode == LayerUpdateMode.CoarseToFineLayerUpdates)
             {
-                IHyperQ<T> g = _Generator();
-                _Layers.Add(g);
-                if(g.RequiresIndexRepositoryLinking)
-                    g.Link(_StateMap, ActionSpace);
-                g.Label = string.Format("L{0}", _Layers.Count);
+                isNew = new bool[_Layers.Count];
+                for (int i = 1; i < _Layers.Count; i++)
+                {
+                    isNew[i] = !_Layers[i].IsKnownState(stateKey.Slice(i + 1));
+                }
             }
+            // Register the complete state so Shape, KnownStates and AsMatrix can enumerate it.
+            _StateMap.MapState(stateKey.Enumerator);
             for (int i = 0; i < _Layers.Count; i++)
             {
                 QState<T> slice = stateKey.Slice(i + 1);
-                bool isNew = UpdateMode == LayerUpdateMode.CoarseToFineLayerUpdates
-                             && i > 0
-                             && !_Layers[i].IsKnownState(slice);
-
                 r = _Layers[i].AddState(slice);
 
-                // CoarseToFine: warm-start new fine states from coarser layer values
-                if (isNew)
+                // CoarseToFine: a new fine state starts at the values its parent has learned. They are read by
+                // action-space index without side effects on the parent, and written to every estimate of the
+                // layer (both tables of a double-Q layer), so the new state reads them back whole.
+                if (isNew != null && isNew[i])
                 {
                     QState<T> coarserSlice = stateKey.Slice(i);
                     if (_Layers[i - 1].IsKnownState(coarserSlice))
                     {
-                        double[] coarseValues = _Layers[i - 1].GetActionArray(coarserSlice);
-                        if (coarseValues != null)
+                        foreach (KeyValuePair<uint, double> kv in _Layers[i - 1].KnownActionValues(coarserSlice).ToList())
                         {
-                            for (int ai = 0; ai < coarseValues.Length; ai++)
-                            {
-                                _Layers[i].SetValue(slice, ActionSpace.FromIndex((uint)ai), coarseValues[ai]);
-                            }
+                            _Layers[i].InitializeValue(slice, ActionSpace.FromIndex(kv.Key), kv.Value);
                         }
                     }
                 }
@@ -243,7 +348,8 @@ namespace HyperQ.Learners
             {
                 if (_Layers[i].IsKnownState(qs))
                 {
-                    return (_Layers[i].GetKnownActionArray(stateKey));
+                    // Query the layer with its own slice of the state, not the complete state.
+                    return (_Layers[i].GetKnownActionArray(qs));
                 }
                 qs.PopLast();
             }
@@ -278,7 +384,9 @@ namespace HyperQ.Learners
             double[] r = new double[max];
             for (uint i = 0; i < max; i++)
             {
-                if (qmap.IsValidIndex(i))
+                // A mapped space can only translate the indexes it has handed out. Other spaces translate every
+                // index below their maximum, and GetValue answers the default for an action that is not known.
+                if (qmap == null || qmap.IsValidIndex(i))
                     r[i] = this[stateKey, ActionSpace.FromIndex(i)];
                 else if (DefaultValueFunc != null)
                     r[i] = DefaultValueFunc();
@@ -410,26 +518,48 @@ namespace HyperQ.Learners
         {
             if (stateKey.Count == _Layers.Count)
             {
-                return(_Layers[_Layers.Count - 1].RemoveState(stateKey));
+                bool removed = _Layers[_Layers.Count - 1].RemoveState(stateKey);
+                _StateMap.RemoveKey(stateKey.Enumerator);
+                return removed;
             }
             return (false);
         }
 
         public void SetValue(QState<T> stateKey, int action, double v)
         {
+            WriteFinest(stateKey, (layer, qs) => layer[qs, action] = v);
+        }
+
+        /// <summary>
+        /// Like <see cref="SetValue"/>, but writes through the layer's <see cref="IHyperQ{T}.InitializeValue"/>, so
+        /// a double-Q layer holds the value in both of its tables.
+        /// </summary>
+        public void InitializeValue(QState<T> stateKey, int action, double v)
+        {
+            WriteFinest(stateKey, (layer, qs) => layer.InitializeValue(qs, action, v));
+        }
+
+        /// <summary>
+        /// Writes the finest layer. While the state has more elements than there are layers, a layer is added
+        /// and written with its slice of the state. The complete state is then registered.
+        /// </summary>
+        private void WriteFinest(QState<T> stateKey, Action<IHyperQ<T>, QState<T>> write)
+        {
             if (stateKey.Count > _Layers.Count)
             {
                 while (stateKey.Count > _Layers.Count)
                 {
-                    IHyperQ<T> g = _Generator();
-                    _Layers.Add(g);
-                    QState<T> qs = stateKey.Slice(_Layers.Count);
-                    g[qs, action] = v;
+                    EnsureLayers(_Layers.Count + 1);
+                    write(_Layers[_Layers.Count - 1], stateKey.Slice(_Layers.Count));
                 }
             }
             else
             {
-                _Layers[_Layers.Count - 1][stateKey, action] = v;
+                write(_Layers[_Layers.Count - 1], stateKey);
+            }
+            if (stateKey.Count == _Layers.Count)
+            {
+                _StateMap.MapState(stateKey.Enumerator);
             }
         }
 
@@ -475,6 +605,53 @@ namespace HyperQ.Learners
                 snap[s] = GetActionArray(s);
             }
             return snap;
+        }
+
+        // ── ICheckpointable ──
+
+        /// <summary>
+        /// Serializer for the elements of the composite state keys in checkpoints; set it for an element type
+        /// without a built-in serializer (see <see cref="QKeySerializerFactory"/>).
+        /// </summary>
+        public virtual IQKeySerializer<T> KeySerializer { get; set; }
+
+        private IQKeySerializer<T> Keys
+        {
+            get { return KeySerializer ?? (KeySerializer = QKeySerializerFactory.GetDefault<T>()); }
+        }
+
+        public int CheckpointVersion { get { return 1; } }
+
+        /// <summary>
+        /// Writes the update mode, the action space, the registry of complete states and every layer. Layers
+        /// that share the registry (double-Q layers) write it again inside their own checkpoints; the restore
+        /// is idempotent.
+        /// </summary>
+        public virtual void SaveCheckpoint(BinaryWriter writer)
+        {
+            writer.Write(CheckpointVersion);
+            writer.Write((int)UpdateMode);
+            CheckpointIO.WriteActionSpace(writer, ActionSpace);
+            _StateMap.SaveCheckpoint(writer, Keys);
+            writer.Write(_Layers.Count);
+            for (int i = 0; i < _Layers.Count; i++)
+            {
+                CheckpointIO.Checkpointable(_Layers[i], "Layer " + i).SaveCheckpoint(writer);
+            }
+        }
+
+        public virtual void LoadCheckpoint(BinaryReader reader)
+        {
+            int version = reader.ReadInt32();
+            UpdateMode = (LayerUpdateMode)reader.ReadInt32();
+            CheckpointIO.ReadActionSpace(reader, ActionSpace);
+            _StateMap.LoadCheckpoint(reader, Keys);
+            int count = reader.ReadInt32();
+            EnsureLayers(count);
+            for (int i = 0; i < count; i++)
+            {
+                CheckpointIO.Checkpointable(_Layers[i], "Layer " + i).LoadCheckpoint(reader);
+            }
         }
     }
 }

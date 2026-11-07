@@ -12,8 +12,11 @@ namespace HyperQ.Training
     /// </summary>
     public static class TrainingCheckpoint
     {
-        /// <summary>File format version for forward-compatibility detection.</summary>
-        public const int FORMAT_VERSION = 1;
+        /// <summary>
+        /// File format version for forward-compatibility detection. Version 2 frames the optional action
+        /// selector payload with its length so it can be skipped; version 1 stored it inline.
+        /// </summary>
+        public const int FORMAT_VERSION = 2;
 
         /// <summary>File extension for HyperQ checkpoint files.</summary>
         public const string FILE_EXTENSION = ".hqc";
@@ -26,7 +29,6 @@ namespace HyperQ.Training
         /// <param name="hp">Current hyperparameters with decayed positions.</param>
         /// <param name="episodeCount">Number of completed episodes.</param>
         /// <param name="elapsedMs">Total wall-clock training time in milliseconds.</param>
-        /// <param name="advantageMode">Active advantage estimation mode.</param>
         /// <param name="sweepMode">Active Dyna sweep mode.</param>
         /// <param name="selector">Optional: action selector (must implement <see cref="ICheckpointable"/>).</param>
         public static void Save(
@@ -35,43 +37,47 @@ namespace HyperQ.Training
             HyperParams hp,
             int episodeCount,
             long elapsedMs = 0,
-            AdvantageMode advantageMode = AdvantageMode.OneStep,
             DynaSweepMode sweepMode = DynaSweepMode.Uniform,
             ICheckpointable selector = null)
         {
-            using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
-            using var writer = new BinaryWriter(fs);
-
-            // ── Header ──
-            writer.Write(FORMAT_VERSION);
-            writer.Write(episodeCount);
-            writer.Write(elapsedMs);
-            writer.Write((int)advantageMode);
-            writer.Write((int)sweepMode);
-
-            // ── HyperParams ──
-            hp.SaveCheckpoint(writer);
-
-            // ── Q-Table ──
-            q.SaveCheckpoint(writer);
-
-            // ── Action Selector (optional) ──
-            if (selector != null)
+            using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+            using (var writer = new BinaryWriter(fs))
             {
-                writer.Write(true);
-                using var selectorStream = new MemoryStream();
-                using (var selectorWriter = new BinaryWriter(selectorStream, System.Text.Encoding.UTF8, leaveOpen: true))
+                // ── Header ──
+                writer.Write(FORMAT_VERSION);
+                writer.Write(episodeCount);
+                writer.Write(elapsedMs);
+                writer.Write(0); // reserved: the first releases of the format stored the trainer's advantage mode here
+                writer.Write((int)sweepMode);
+
+                // ── HyperParams ──
+                hp.SaveCheckpoint(writer);
+
+                // ── Q-Table ──
+                q.SaveCheckpoint(writer);
+
+                // ── Action Selector (optional) ──
+                if (selector != null)
                 {
-                    selector.SaveCheckpoint(selectorWriter);
-                }
+                    writer.Write(true);
+                    // Frame the selector payload with its length so a restore
+                    // without a selector can skip over it cleanly.
+                    using (var selectorStream = new MemoryStream())
+                    {
+                        using (var selectorWriter = new BinaryWriter(selectorStream, System.Text.Encoding.UTF8, leaveOpen: true))
+                        {
+                            selector.SaveCheckpoint(selectorWriter);
+                        }
 
-                byte[] selectorBytes = selectorStream.ToArray();
-                writer.Write(selectorBytes.Length);
-                writer.Write(selectorBytes);
-            }
-            else
-            {
-                writer.Write(false);
+                        byte[] selectorBytes = selectorStream.ToArray();
+                        writer.Write(selectorBytes.Length);
+                        writer.Write(selectorBytes);
+                    }
+                }
+                else
+                {
+                    writer.Write(false);
+                }
             }
         }
 
@@ -89,49 +95,64 @@ namespace HyperQ.Training
             HyperParams hp,
             ICheckpointable selector = null)
         {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
-            using var reader = new BinaryReader(fs);
-
-            // ── Header ──
-            int version = reader.ReadInt32();
-            if (version > FORMAT_VERSION)
-                throw new InvalidOperationException(
-                    $"Checkpoint file version {version} is newer than supported version {FORMAT_VERSION}.");
-
-            int episodeCount = reader.ReadInt32();
-            long elapsedMs = reader.ReadInt64();
-            var advantageMode = (AdvantageMode)reader.ReadInt32();
-            var sweepMode = (DynaSweepMode)reader.ReadInt32();
-
-            // ── HyperParams ──
-            hp.LoadCheckpoint(reader);
-
-            // ── Q-Table ──
-            q.LoadCheckpoint(reader);
-
-            // ── Action Selector (optional) ──
-            bool hasSelector = reader.ReadBoolean();
-            if (hasSelector)
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+            using (var reader = new BinaryReader(fs))
             {
-                int selectorLength = reader.ReadInt32();
-                byte[] selectorBytes = reader.ReadBytes(selectorLength);
+                // ── Header ──
+                int version = reader.ReadInt32();
+                if (version > FORMAT_VERSION)
+                    throw new InvalidOperationException(
+                        $"Checkpoint file version {version} is newer than supported version {FORMAT_VERSION}.");
 
-                if (selector != null)
+                int episodeCount = reader.ReadInt32();
+                long elapsedMs = reader.ReadInt64();
+                reader.ReadInt32(); // reserved slot (the advantage mode of the first releases of the format), ignored
+                var sweepMode = (DynaSweepMode)reader.ReadInt32();
+
+                // ── HyperParams ──
+                hp.LoadCheckpoint(reader);
+
+                // ── Q-Table ──
+                q.LoadCheckpoint(reader);
+
+                // ── Action Selector (optional) ──
+                bool hasSelector = reader.ReadBoolean();
+                if (hasSelector)
                 {
-                    using var selectorStream = new MemoryStream(selectorBytes);
-                    using var selectorReader = new BinaryReader(selectorStream);
-                    selector.LoadCheckpoint(selectorReader);
-                }
-            }
+                    if (version >= 2)
+                    {
+                        // Version 2 frames the selector payload with its length so a restore without a
+                        // selector can skip over it cleanly.
+                        int selectorLength = reader.ReadInt32();
+                        byte[] selectorBytes = reader.ReadBytes(selectorLength);
 
-            return new CheckpointMetadata
-            {
-                EpisodeCount = episodeCount,
-                ElapsedMilliseconds = elapsedMs,
-                AdvantageMode = advantageMode,
-                SweepMode = sweepMode,
-                FormatVersion = version
-            };
+                        if (selector != null)
+                        {
+                            using (var selectorStream = new MemoryStream(selectorBytes))
+                            {
+                                using (var selectorReader = new BinaryReader(selectorStream))
+                                {
+                                    selector.LoadCheckpoint(selectorReader);
+                                }
+                            }
+                        }
+                    }
+                    else if (selector != null)
+                    {
+                        // Version 1 wrote the selector state inline, right after the Q table. It is the last
+                        // section of the file, so a caller without a selector simply stops reading here.
+                        selector.LoadCheckpoint(reader);
+                    }
+                }
+
+                return new CheckpointMetadata
+                {
+                    EpisodeCount = episodeCount,
+                    ElapsedMilliseconds = elapsedMs,
+                    SweepMode = sweepMode,
+                    FormatVersion = version
+                };
+            }
         }
     }
 
@@ -146,9 +167,6 @@ namespace HyperQ.Training
 
         /// <summary>Total wall-clock training time in milliseconds.</summary>
         public long ElapsedMilliseconds { get; set; }
-
-        /// <summary>Advantage mode that was active when the checkpoint was saved.</summary>
-        public AdvantageMode AdvantageMode { get; set; }
 
         /// <summary>Dyna sweep mode that was active when the checkpoint was saved.</summary>
         public DynaSweepMode SweepMode { get; set; }

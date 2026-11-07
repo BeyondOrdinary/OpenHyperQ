@@ -16,15 +16,25 @@ namespace HyperQ.Util
     {
         private IIndexMapper<T> _Final;
         private Dictionary<T, MemoryBackedHyperMapper<T>> _Sub;
+        private readonly IndexRepo _Repo;
         private bool IsEmpty => (_Final == null || _Final.MappingCount == 0) && (_Sub == null || _Sub.Count == 0);
 
+        /// <summary>
+        /// Creates a mapper whose every level draws its indexes from <paramref name="repo"/>, or from a
+        /// repository of its own when none is given. The levels share one repository because the indexes of
+        /// all the states mapped anywhere in the tree address the rows of one table.
+        /// </summary>
         public MemoryBackedHyperMapper(IndexRepo repo = null)
         {
-            if (repo != null)
-            {
-                _Final = new IndexMapper<T>();
-                _Final.Repo = repo;
-            }
+            _Repo = repo ?? new IndexRepo();
+        }
+
+        /// <summary>
+        /// The repository every level of this mapper draws its indexes from.
+        /// </summary>
+        public IndexRepo Repo
+        {
+            get { return _Repo; }
         }
 
         public T From(uint index)
@@ -52,7 +62,7 @@ namespace HyperQ.Util
 
         public MemoryBackedHyperMapper<T> Clone()
         {
-            MemoryBackedHyperMapper<T> h = new MemoryBackedHyperMapper<T>();
+            MemoryBackedHyperMapper<T> h = new MemoryBackedHyperMapper<T>(_Repo);
             if (_Final != null)
             {
                 h._Final = _Final.Clone();
@@ -69,28 +79,88 @@ namespace HyperQ.Util
         }
 
         /// <summary>
-        /// Returns the permutable count of states found in this hyper path
+        /// Returns the number of keys mapped anywhere in this hyper path: the keys held at this level plus the
+        /// keys held by every sub path. A learner whose states all have the same number of elements therefore
+        /// sees the number of distinct states it has mapped. (This used to multiply the level sizes, which is
+        /// not a count of anything and overflows quickly.)
         /// </summary>
-        /// <returns></returns>
         public uint MappingCount
         {
             get
             {
                 uint count = 0;
-                if(_Sub != null)
+                if (_Sub != null)
+                {
                     foreach (MemoryBackedHyperMapper<T> h in _Sub.Values)
                     {
-                        if (count == 0)
-                            count = 1;
-                        count *= h.MappingCount;
+                        count += h.MappingCount;
                     }
+                }
                 if (_Final != null)
                 {
-                    if (count == 0)
-                        count = 1;
-                    count *= _Final.MappingCount;
+                    count += _Final.MappingCount;
                 }
                 return count;
+            }
+        }
+
+        /// <summary>
+        /// Returns the number of keys mapped exactly <paramref name="depth"/> elements below this level, which
+        /// is the number of states with that many elements. Depth 1 counts the keys held at this level.
+        /// </summary>
+        public uint MappingCountAtDepth(int depth)
+        {
+            if (depth <= 0)
+            {
+                return 0;
+            }
+            if (depth == 1)
+            {
+                return _Final != null ? _Final.MappingCount : 0;
+            }
+            uint count = 0;
+            if (_Sub != null)
+            {
+                foreach (MemoryBackedHyperMapper<T> h in _Sub.Values)
+                {
+                    count += h.MappingCountAtDepth(depth - 1);
+                }
+            }
+            return count;
+        }
+
+        /// <summary>
+        /// Returns a snapshot of every mapped state with its index. Each state lists the key elements from this
+        /// level down to the mapped key, so a mapper that only ever saw n-element states yields n-element states.
+        /// </summary>
+        public List<KeyValuePair<QState<T>, uint>> Mappings()
+        {
+            List<KeyValuePair<QState<T>, uint>> result = new List<KeyValuePair<QState<T>, uint>>();
+            CollectMappings(new List<T>(), result);
+            return result;
+        }
+
+        private void CollectMappings(List<T> prefix, List<KeyValuePair<QState<T>, uint>> result)
+        {
+            IndexMapper<T> final = _Final as IndexMapper<T>;
+            if (final != null)
+            {
+                foreach (KeyValuePair<T, uint> kv in final.Mappings)
+                {
+                    T[] path = new T[prefix.Count + 1];
+                    prefix.CopyTo(path);
+                    path[prefix.Count] = kv.Key;
+                    result.Add(new KeyValuePair<QState<T>, uint>(new QState<T>(path), kv.Value));
+                }
+            }
+            if (_Sub != null)
+            {
+                foreach (KeyValuePair<T, MemoryBackedHyperMapper<T>> kv in _Sub)
+                {
+                    prefix.Add(kv.Key);
+                    kv.Value.CollectMappings(prefix, result);
+                    prefix.RemoveAt(prefix.Count - 1);
+                }
             }
         }
         public bool RemoveKey(T key)
@@ -199,7 +269,7 @@ namespace HyperQ.Util
             {
                 if (_Final == null)
                 {
-                    _Final = new IndexMapper<T>();
+                    _Final = new IndexMapper<T>(_Repo);
                 }
                 return _Final[key];
             }
@@ -214,7 +284,7 @@ namespace HyperQ.Util
                 var k = e.Value;
                 if (map._Sub == null) map._Sub = new Dictionary<T, MemoryBackedHyperMapper<T>>();
                 if (!map._Sub.TryGetValue(k, out var next))
-                    map._Sub[k] = next = new MemoryBackedHyperMapper<T>(map._Final?.Repo);
+                    map._Sub[k] = next = new MemoryBackedHyperMapper<T>(map._Repo);
                 map = next;
                 e.MoveNext();
             }
@@ -263,6 +333,64 @@ namespace HyperQ.Util
                     _Sub[key].Dump(sw);
                 }
             sw.WriteLine("=============");
+        }
+
+        // ── checkpoints ──
+
+        /// <summary>Restores one mapping recorded by a checkpoint: the state's key path maps to the given index.</summary>
+        public void Restore(QState<T> state, uint index)
+        {
+            QStateEnum<T> e = state.Enumerator;
+            MemoryBackedHyperMapper<T> map = this;
+            while (e.HasNext)
+            {
+                T k = e.Value;
+                if (map._Sub == null) map._Sub = new Dictionary<T, MemoryBackedHyperMapper<T>>();
+                MemoryBackedHyperMapper<T> next;
+                if (!map._Sub.TryGetValue(k, out next))
+                    map._Sub[k] = next = new MemoryBackedHyperMapper<T>(map._Repo);
+                map = next;
+                e.MoveNext();
+            }
+            if (map._Final == null) map._Final = new IndexMapper<T>(map._Repo);
+            IndexMapper<T> final = map._Final as IndexMapper<T>;
+            if (final == null)
+                throw new NotSupportedException("Only memory backed index mappers can be restored from a checkpoint.");
+            final.Restore(e.Value, index);
+        }
+
+        /// <summary>Forgets every mapping at every depth.</summary>
+        public void Clear()
+        {
+            (_Final as IndexMapper<T>)?.Clear();
+            _Sub = null;
+        }
+
+        /// <summary>Writes every mapped state, as its key path, with its index.</summary>
+        public void SaveCheckpoint(BinaryWriter writer, IQKeySerializer<T> elementKeys)
+        {
+            QStateKeySerializer<T> states = new QStateKeySerializer<T>(elementKeys);
+            List<KeyValuePair<QState<T>, uint>> mappings = Mappings();
+            writer.Write(mappings.Count);
+            foreach (KeyValuePair<QState<T>, uint> kv in mappings)
+            {
+                states.Serialize(writer.BaseStream, kv.Key);
+                writer.Write(kv.Value);
+            }
+        }
+
+        /// <summary>Replaces the mappings with those written by <see cref="SaveCheckpoint"/>.</summary>
+        public void LoadCheckpoint(BinaryReader reader, IQKeySerializer<T> elementKeys)
+        {
+            QStateKeySerializer<T> states = new QStateKeySerializer<T>(elementKeys);
+            Clear();
+            int count = reader.ReadInt32();
+            for (int i = 0; i < count; i++)
+            {
+                QState<T> state = states.Deserialize(reader.BaseStream);
+                uint index = reader.ReadUInt32();
+                Restore(state, index);
+            }
         }
     }
 }

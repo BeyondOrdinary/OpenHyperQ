@@ -25,7 +25,11 @@ namespace HyperQ.Learners
             _uniformRef = 1.0 / actionSpace.MaximumNumberOfActions;
         }
 
-        /// <summary>Convenience 1-arg ctor — creates internal MemoryBackedHyperMapper&lt;T&gt;.</summary>
+        /// <summary>
+        /// Retired for the reason given on <see cref="PolicyGradientActionSelector{T}"/>'s one-argument constructor:
+        /// a mapper of its own numbers states differently from the learner. Pass the learner as the mapper instead.
+        /// </summary>
+        [Obsolete("Pass the learner as the state mapper: new SoftmaxWithKLPenaltyActionSelector<T>(learner, actionSpace, klCoef). The trainer hands ApplyAdvantage the learner's state index, so a selector with a mapper of its own applies each learned policy to the wrong state.", true)]
         public SoftmaxWithKLPenaltyActionSelector(QActionSpace<int> actionSpace, double klCoef)
             : this(new MemoryMapperAdapter<T>(), actionSpace, klCoef) { }
 
@@ -38,14 +42,14 @@ namespace HyperQ.Learners
             // 2) apply a KL(p||p_ref) penalty gradient to keep policy close to reference
             var softmax = Theta[s];
 
+            // Snapshot the current probabilities; every write below renormalizes the others.
             ICollection<int> keys = softmax.Keys.ToList();
+            Dictionary<int, double> p = keys.ToDictionary(k => k, k => softmax.Probability(k));
             foreach (int idx in keys)
             {
-                // current policy probability
-                double p = softmax[idx];
                 // gradient of D_KL(p||p_ref) = log(p/p_ref) + 1
-                double klGrad = Math.Log(p / _uniformRef) + 1.0;
-                // subtract a small step in direction of reducing KL
+                double klGrad = Math.Log(p[idx] / _uniformRef) + 1.0;
+                // subtract a small step on the logit in the direction that reduces KL
                 softmax[idx] -= hp.Alpha * KlCoef * klGrad;
             }
         }

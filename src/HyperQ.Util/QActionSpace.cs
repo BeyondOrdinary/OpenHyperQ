@@ -3,16 +3,21 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.IO;
 
 namespace HyperQ.Util
 {
     [Serializable]
-    public abstract class QActionSpace<T>
+    public abstract class QActionSpace<T> : ICheckpointable
     {
-        public QRandom Random { get; protected set; } = QRandom.Instance;
-        public QActionSpace(QRandom ran=null)
+        /// <summary>
+        /// The source random actions are drawn from. Learners, selectors and trainers built on this space draw
+        /// from it too unless they are given a source of their own.
+        /// </summary>
+        public QRandom Random { get; protected set; }
+        public QActionSpace(QRandom ran)
         {
-            Random = ran ?? QRandom.Instance;
+            Random = ran ?? throw new ArgumentNullException(nameof(ran));
         }
 
         /// <summary>
@@ -65,5 +70,22 @@ namespace HyperQ.Util
         /// <param name="action">The action, in action space</param>
         /// <returns></returns>
         public abstract uint ToIndex(T action);
+
+        // ── checkpoints ──
+
+        /// <summary>
+        /// True when this action space can save and restore its action-to-index mapping. Learners save it with
+        /// their rows, because the column an action occupies depends on the order the actions were seen.
+        /// </summary>
+        public virtual bool SupportsCheckpoints { get { return false; } }
+        public virtual int CheckpointVersion { get { return 1; } }
+        public virtual void SaveCheckpoint(BinaryWriter writer)
+        {
+            throw new NotSupportedException(GetType().Name + " does not support checkpoints.");
+        }
+        public virtual void LoadCheckpoint(BinaryReader reader)
+        {
+            throw new NotSupportedException(GetType().Name + " does not support checkpoints.");
+        }
     }
 }

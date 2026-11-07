@@ -5,30 +5,31 @@ using System.Linq;
 using System.Reflection.Emit;
 using System.Text;
 using System.Threading.Tasks;
+using System.IO;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.Learners
 {
     [Serializable]
-    public class ClassicQQ : BaseQ<decimal>
+    public class ClassicQQ : BaseQ<decimal>, ICheckpointable
     {
         private Q<decimal> _Q1;
         private Q<decimal> _Q2;
         private int _WhichQ = 0;
-        private Random _random = QRandom.Instance.Ran;
+        private QRandom _random;
         private Func<double, double, double> _BlendingFunction = null;
 
-        public ClassicQQ(QActionSpace<int> actionSpace, Func<double> defaultValueAction = null, Func<double, double, double> blendingFunction = null, Random ran = null) : base(actionSpace)
+        /// <param name="ran">Decides which table an update goes to; the action space's source when null.</param>
+        public ClassicQQ(QActionSpace<int> actionSpace, Func<double> defaultValueAction = null, Func<double, double, double> blendingFunction = null, QRandom ran = null) : base(actionSpace)
         {
+            FeatureGate.Require(HyperQFeatures.LearnerDoubleQ);
             _Q1 = new ClassicQ(actionSpace, defaultValueAction);
             _Q2 = new ClassicQ(actionSpace, defaultValueAction);
             if (defaultValueAction != null)
             {
                 DefaultValueFunc = defaultValueAction;
             }
-            if (ran != null)
-            {
-                _random = ran;
-            }
+            _random = ran ?? actionSpace.Random;
             if (blendingFunction != null)
             {
                 _BlendingFunction = blendingFunction;
@@ -131,7 +132,7 @@ namespace HyperQ.Learners
 
         public override Q<decimal> Clone()
         {
-            ClassicQQ c = new ClassicQQ(ActionSpace, DefaultValueFunc);
+            ClassicQQ c = new ClassicQQ(ActionSpace, DefaultValueFunc, ran: _random);
             c._Q1 = _Q1.Clone();
             c._Q2 = _Q2.Clone();
             return (c);
@@ -221,7 +222,8 @@ namespace HyperQ.Learners
             Q<decimal> q2 = qq[(_WhichQ + 1) % 2];
             double prime_v = q2.GetValue(sprime, aprime);
             double curr_v = q1.GetValue(s, a);
-            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage);
+            double baseline = QUpdateCore.Baseline(q1.GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             q1.SetValue(s, a, new_v);
             return new_v;
         }
@@ -238,7 +240,8 @@ namespace HyperQ.Learners
             int aprime = QUpdateCore.SelectGreedyAction(sprime, a, evalType, q1.ArgMax, q1.ArgMin);
             double prime_v = q2.GetValue(sprime, aprime);
             double curr_v = q1.GetValue(s, a);
-            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage);
+            double baseline = QUpdateCore.Baseline(q1.GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             q1.SetValue(s, a, new_v);
             return new_v;
         }
@@ -251,7 +254,7 @@ namespace HyperQ.Learners
         {
             if (random)
             {
-                _WhichQ = _random.Next(2);
+                _WhichQ = _random.Ran.Next(2);
             }
             else
             {
@@ -299,6 +302,26 @@ namespace HyperQ.Learners
             {
                 CurrentQ().SetValue(state, action, value);
             }
+        }
+
+        // ── ICheckpointable ──
+
+        public int CheckpointVersion { get { return 1; } }
+
+        public void SaveCheckpoint(BinaryWriter writer)
+        {
+            writer.Write(CheckpointVersion);
+            writer.Write(_WhichQ);
+            CheckpointIO.Checkpointable(_Q1, "The first Q table").SaveCheckpoint(writer);
+            CheckpointIO.Checkpointable(_Q2, "The second Q table").SaveCheckpoint(writer);
+        }
+
+        public void LoadCheckpoint(BinaryReader reader)
+        {
+            int version = reader.ReadInt32();
+            _WhichQ = reader.ReadInt32();
+            CheckpointIO.Checkpointable(_Q1, "The first Q table").LoadCheckpoint(reader);
+            CheckpointIO.Checkpointable(_Q2, "The second Q table").LoadCheckpoint(reader);
         }
     }
 }

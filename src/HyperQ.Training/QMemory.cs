@@ -20,14 +20,16 @@ namespace HyperQ.Training
     public class QMemory<T,RT>
     {
         protected List<QMemoryCell<T,RT>> _Memory = new List<QMemoryCell<T,RT>>();
+        /// <summary>The steps remembered since the last <see cref="StartEpisode"/>, for <see cref="ReplayEpisode"/>.</summary>
         protected List<QMemoryCell<T,RT>> _Episode = new List<QMemoryCell<T,RT>>();
         protected int _MaxSize = 500;
         protected QRandom _random;
 
-        public QMemory(int maxSize, QRandom ran = null)
+        /// <param name="ran">The source of the replay and culling draws.</param>
+        public QMemory(int maxSize, QRandom ran)
         {
             _MaxSize = maxSize;
-            _random = ran;
+            _random = ran ?? throw new ArgumentNullException(nameof(ran));
         }
 
         public virtual void StartEpisode()
@@ -37,6 +39,33 @@ namespace HyperQ.Training
         public virtual void EndEpisode()
         {
             // Do nothing
+        }
+
+        /// <summary>
+        /// When true, episodes are replayed from their last step back to their first: by <see cref="ReplayEpisode"/>
+        /// (the trainers' Obsess) and by the episodic memories' Playback. One backward pass carries an episode's
+        /// outcome back along every step that led to it; a forward pass moves it back one step. Off by default.
+        /// It does not affect the transition memories' Playback, whose draws are random.
+        /// </summary>
+        public bool ReplayBackward { get; set; } = false;
+
+        /// <summary>Returns the cells in replay order: as remembered, or last first when <see cref="ReplayBackward"/> is set.</summary>
+        protected IEnumerable<QMemoryCell<T,RT>> InReplayOrder(IList<QMemoryCell<T,RT>> cells)
+        {
+            if (ReplayBackward)
+            {
+                for (int i = cells.Count - 1; i >= 0; i--)
+                {
+                    yield return cells[i];
+                }
+            }
+            else
+            {
+                for (int i = 0; i < cells.Count; i++)
+                {
+                    yield return cells[i];
+                }
+            }
         }
 
         public virtual int Capacity
@@ -55,9 +84,14 @@ namespace HyperQ.Training
             }
         }
 
+        /// <summary>
+        /// Replays the steps remembered since the last <see cref="StartEpisode"/>, in order (last first when
+        /// <see cref="ReplayBackward"/> is set): after <see cref="EndEpisode"/>, the episode that just ended; during an
+        /// episode, the episode so far.
+        /// </summary>
         public virtual void ReplayEpisode(HyperParams hp, Func<QMemoryCell<T,RT>, HyperParams, bool> callback)
         {
-            foreach (QMemoryCell<T,RT> mem in _Episode)
+            foreach (QMemoryCell<T,RT> mem in InReplayOrder(_Episode))
             {
                 callback(mem, hp);
             }
@@ -89,6 +123,7 @@ namespace HyperQ.Training
                 _Memory.RemoveAt(0);
             }
             _Memory.Add(m);
+            _Episode.Add(m);
             return (m);
         }
 

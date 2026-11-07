@@ -20,11 +20,24 @@ namespace HyperQ.Learners
         public PolicyGradientWithSoftmaxActionSelector(IStateMapper<T> mapper, QActionSpace<int> actionSpace) : base(mapper, actionSpace) {
             _mapper = mapper;
         }
-        /// <summary>Convenience 1-arg ctor — creates internal MemoryBackedHyperMapper&lt;T&gt;.</summary>
+        /// <summary>
+        /// Retired for the reason given on <see cref="PolicyGradientActionSelector{T}"/>'s one-argument constructor:
+        /// a mapper of its own numbers states differently from the learner. Pass the learner as the mapper instead.
+        /// </summary>
+        [Obsolete("Pass the learner as the state mapper: new PolicyGradientWithSoftmaxActionSelector<T>(learner, actionSpace). The trainer hands ApplyAdvantage the learner's state index, so a selector with a mapper of its own applies each learned policy to the wrong state.", true)]
         public PolicyGradientWithSoftmaxActionSelector(QActionSpace<int> actionSpace)
             : this(new MemoryMapperAdapter<T>(), actionSpace) { }
 
-        public MinMaxActionEnum Mode { get; set; } = MinMaxActionEnum.Default;
+        /// <summary>
+        /// Retired alias of <see cref="UniformActionSelector{T}.ActionMode"/>. This selector used to read this separate
+        /// property instead of ActionMode, so callers that switched to evaluation through the interface kept sampling.
+        /// </summary>
+        [Obsolete("Use ActionMode. Mode is now an alias of it, and the selector reads ActionMode.")]
+        public MinMaxActionEnum Mode
+        {
+            get { return ActionMode; }
+            set { ActionMode = value; }
+        }
 
         protected Dictionary<uint, RunningSoftMax> Theta
         {
@@ -89,17 +102,22 @@ namespace HyperQ.Learners
                 _Theta[s] = sm;
             }
             var softmax = _Theta[s];
-            // update all actions
-            for (int i = 0; i < _actionSpace.MaximumNumberOfActions; i++)
+            // Snapshot the probabilities: the gradient is taken at the policy before the step, and every
+            // write renormalizes the others.
+            int n = (int)_actionSpace.MaximumNumberOfActions;
+            double[] p = new double[n];
+            for (int i = 0; i < n; i++)
+                p[i] = softmax.Probability(i);
+            // update all actions; the indexer reads and writes the logit
+            for (int i = 0; i < n; i++)
             {
-                double p = softmax[i];
                 if (i == a.Index)
                 {
-                    softmax[i] += hp.Alpha * advantage * (1.0 - p);
+                    softmax[i] += hp.Alpha * advantage * (1.0 - p[i]);
                 }
                 else
                 {
-                    softmax[i] -= hp.Alpha * advantage * p;
+                    softmax[i] -= hp.Alpha * advantage * p[i];
                 }
             }
         }
@@ -108,13 +126,13 @@ namespace HyperQ.Learners
         {
             LastActionWasRandom = false;
             RunningSoftMax rl = _Theta[state_index];
-            if (Mode == MinMaxActionEnum.MostProbable)
+            if (ActionMode == MinMaxActionEnum.MostProbable)
             {
                 uint a_max = 0;
                 double p_max = -1.0;
                 for (uint a = 0; a < _actionSpace.NumberOfKnownActions; a++)
                 {
-                    double p = rl[(int)a];
+                    double p = rl.Probability((int)a);
                     if (p > p_max)
                     {
                         p_max = p;
@@ -124,13 +142,13 @@ namespace HyperQ.Learners
                 LastActionProbability = p_max;
                 return a_max;
             }
-            else if (Mode == MinMaxActionEnum.LeastProbable)
+            else if (ActionMode == MinMaxActionEnum.LeastProbable)
             {
                 uint a_min = 0;
                 double p_min = 1.0;
                 for (uint a = 0; a < _actionSpace.NumberOfKnownActions; a++)
                 {
-                    double p = rl[(int)a];
+                    double p = rl.Probability((int)a);
                     if (p < p_min)
                     {
                         p_min = p;
@@ -147,7 +165,7 @@ namespace HyperQ.Learners
                 double cumulative = 0.0;
                 for (uint a = 0; a < _actionSpace.NumberOfKnownActions; a++)
                 {
-                    double p = softmax[(int)a];
+                    double p = softmax.Probability((int)a);
                     cumulative += p;
                     if (roll < cumulative)
                     {

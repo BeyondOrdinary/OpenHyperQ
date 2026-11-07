@@ -15,6 +15,32 @@ namespace HyperQ.Util
         }
 
         /// <summary>
+        /// Gets or sets the logit for the given index (0 when it has never been set). Setting a logit updates
+        /// the softmax, whose probabilities are read with <see cref="Probability"/>. The indexer reads and
+        /// writes the same quantity, so <c>sm[i] += delta</c> is a step on the logit. (It used to read back the
+        /// probability, which turned that step into "the probability plus delta".)
+        /// </summary>
+        public override double this[int idx]
+        {
+            get
+            {
+                return __raw_value(idx);
+            }
+            set
+            {
+                base[idx] = value;
+            }
+        }
+
+        /// <summary>
+        /// Returns the softmax probability of the given index.
+        /// </summary>
+        public double Probability(int idx)
+        {
+            return base[idx];
+        }
+
+        /// <summary>
         /// Returns the exp(value - max) for the softmax of logits calculation.
         /// </summary>
         /// <param name="idx"></param>

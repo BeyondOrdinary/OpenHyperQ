@@ -26,7 +26,11 @@ namespace HyperQ.Learners
             _uniformRef = 1.0 / actionSpace.MaximumNumberOfActions;
         }
 
-        /// <summary>Convenience 1-arg ctor — creates internal MemoryBackedHyperMapper&lt;T&gt;.</summary>
+        /// <summary>
+        /// Retired for the reason given on <see cref="PolicyGradientActionSelector{T}"/>'s one-argument constructor:
+        /// a mapper of its own numbers states differently from the learner. Pass the learner as the mapper instead.
+        /// </summary>
+        [Obsolete("Pass the learner as the state mapper: new GRPOWithKLPenaltyActionSelector<T>(learner, actionSpace, klCoef). The trainer hands ApplyAdvantage the learner's state index, so a selector with a mapper of its own applies each learned policy to the wrong state.", true)]
         public GRPOWithKLPenaltyActionSelector(QActionSpace<int> actionSpace, double klCoef)
             : this(new MemoryMapperAdapter<T>(), actionSpace, klCoef) { }
 
@@ -37,17 +41,17 @@ namespace HyperQ.Learners
 
             // 2) apply a KL(p||p_ref) penalty gradient to keep policy close to reference
             var logits = Theta[s];
-            // ensure priors locked so .Probability yields current p
+            // Snapshot the current probabilities; every write below renormalizes the others.
             var priors = logits.LockPriors();
 
             foreach (int idx in priors.Keys)
             {
                 // current policy probability
-                double p = logits.Probability(idx);
+                double p = priors[idx];
                 // gradient of D_KL(p||p_ref) = log(p/p_ref) + 1
                 double klGrad = Math.Log(p / _uniformRef);// + 1.0;
                 // double klGrad = p - _uniformRef;
-                // subtract a small step in direction of reducing KL
+                // subtract a small step on the logit in the direction that reduces KL
                 logits[idx] -= hp.Alpha * KlCoef * klGrad;
             }
         }

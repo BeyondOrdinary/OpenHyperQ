@@ -1,4 +1,4 @@
-﻿using HyperQ.Util;
+using HyperQ.Util;
 using HyperQ.Env;
 using System;
 using System.Collections.Generic;
@@ -19,7 +19,14 @@ namespace HuntTheWumpus
     {
         Model1,
         Model2,
-        Model3
+        Model3,
+        /// <summary>
+        /// Model1, kept under its own name for settings that use it. It was Model1 with a constant invalid-move penalty
+        /// while Models 1 to 3 divided that penalty by the share of food eaten (-64 at the start of an episode, -320 next
+        /// to the gold, against -10 for dying and +120 for winning). The division has since been removed from all of
+        /// them, so every model now charges -1 for an invalid move, or -5 next to the gold.
+        /// </summary>
+        Model4
     }
     public class WumpusGameStatus : Tuple<int, int, int, int, PlayerStatus, CaveItem[],int>
     {
@@ -37,6 +44,8 @@ namespace HuntTheWumpus
     }
     public class WumpusBaseGameEnv
     {
+        /// <summary>The static cave's seed when none is given.</summary>
+        public const int DefaultStaticSeed = 903387237;
         private const int FOODMAX = 64; // for number of bits optimization
         /*
          * Game State at any time is what can be seen around the player in terms of 8 directions
@@ -66,6 +75,11 @@ namespace HuntTheWumpus
 
         public EnvMetrics Metrics { get; set; }
         /// <summary>
+        /// Whether the state includes the food level. An episode is capped at 500 steps and food lasts 640, so the food
+        /// level mostly splits each cell into dozens of states; option nofood leaves it out.
+        /// </summary>
+        public bool IncludeFood { get; set; } = true;
+        /// <summary>
         /// Dimensions of the arena, (rows,columns)
         /// </summary>
         public Tuple<int, int> Dimensions { get; set; } = new Tuple<int, int>(12, 12);
@@ -83,13 +97,17 @@ namespace HuntTheWumpus
             }
         }
 
-        public WumpusBaseGameEnv(QRandom ran = null, bool quiet = false, RewardModelType rewardModel = default, Tuple<int,int> dims = default)
+        /// <param name="staticSeed">Without a random source, the seed the static cave is rebuilt from on every reset.</param>
+        public WumpusBaseGameEnv(QRandom ran = null, bool quiet = false, RewardModelType rewardModel = default, Tuple<int,int> dims = default, int staticSeed = DefaultStaticSeed)
         {
             _ran = ran;
             if (_ran == null)
             {
-                _resetSeed = 903387237;
-                _ran = QRandom.Instance.Seed(_resetSeed);
+                // A static world: its own source, restarted from the same seed on every reset, so every episode
+                // plays the same cave. (It used to reseed the process-wide source, which also rewound the
+                // learners' and selectors' draws at every reset.)
+                _resetSeed = staticSeed;
+                _ran = new QRandom(_resetSeed);
                 Console.WriteLine("CREATED WORLD WITH STATIC SEED {0}", _resetSeed);
             }
             if (dims == null)
@@ -116,7 +134,7 @@ namespace HuntTheWumpus
         {
             if (_resetSeed >= 0)
             {
-                _ran = QRandom.Instance.Seed(_resetSeed);
+                _ran.Seed(_resetSeed);
                 if (!Quiet)
                 {
                     Console.WriteLine("RESET WORLD WITH STATIC SEED {0}", _resetSeed);
@@ -294,16 +312,12 @@ namespace HuntTheWumpus
                 if(!Quiet)
                     Console.WriteLine("INVALID MOVE");
                 reward = -1.0;
-                double food_pct = 1.0 - (double)_Food / (double)FOODMAX;
-
                 if (_Gold == 0 && dg1 < 2)
                 {
                     if (!Quiet)
                         Console.WriteLine("INVALID MOVE NEAR GOLD, PENALTY!");
                     reward = -5.0;
                 }
-                if(food_pct > 0.0)
-                    reward = reward / food_pct;
             }
             if (!Quiet)
             {
@@ -417,16 +431,12 @@ namespace HuntTheWumpus
                 if (!Quiet)
                     Console.WriteLine("INVALID MOVE");
                 reward = -1.0;
-                double food_pct = 1.0 - (double)_Food / (double)FOODMAX;
-
                 if (_Gold == 0 && dg1 < 2)
                 {
                     if (!Quiet)
                         Console.WriteLine("INVALID MOVE NEAR GOLD, PENALTY!");
                     reward = -5.0;
                 }
-                if (food_pct > 0.0)
-                    reward = reward / food_pct;
             }
             if (!Quiet)
             {
@@ -529,16 +539,12 @@ namespace HuntTheWumpus
                 if (!Quiet)
                     Console.WriteLine("INVALID MOVE");
                 reward = -1.0;
-                double food_pct = 1.0 - (double)_Food / (double)FOODMAX;
-
                 if (_Gold == 0 && dg1 < 2)
                 {
                     if (!Quiet)
                         Console.WriteLine("INVALID MOVE NEAR GOLD, PENALTY!");
                     reward = -5.0;
                 }
-                if (food_pct > 0.0)
-                    reward = reward / food_pct;
             }
             if (!Quiet)
             {
@@ -565,6 +571,7 @@ namespace HuntTheWumpus
                 case RewardModelType.Model1: r= Model1Step(action); break;
                 case RewardModelType.Model2: r= Model2Step(action);break;
                 case RewardModelType.Model3: r = Model3Step(action); break;
+                case RewardModelType.Model4: r = Model1Step(action); break;
                 default:
                     throw new NotImplementedException();
             }

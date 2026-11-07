@@ -334,7 +334,8 @@ namespace HyperQ.Learners
         {
             double prime_v = GetValue(sprime, aprime);
             double curr_v = GetValue(s, a);
-            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage);
+            double baseline = QUpdateCore.Baseline(GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             SetValue(s, a, new_v);
             return new_v;
         }
@@ -343,7 +344,8 @@ namespace HyperQ.Learners
             int aprime = QUpdateCore.SelectGreedyAction(sprime, a, evalType, ArgMax, ArgMin);
             double prime_v = GetValue(sprime, aprime);
             double curr_v = GetValue(s, a);
-            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage);
+            double baseline = QUpdateCore.Baseline(GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             SetValue(s, a, new_v);
             return new_v;
         }
@@ -395,12 +397,14 @@ namespace HyperQ.Learners
 
         // ── ICheckpointable ──
 
-        public int CheckpointVersion => 1;
+        public int CheckpointVersion => 2;
 
         public void SaveCheckpoint(BinaryWriter writer)
         {
             writer.Write(CheckpointVersion);
             writer.Write((int)ActionSpace.MaximumNumberOfActions);
+            // Version 2: the action space's own state, so the action-to-column mapping is restored with the rows
+            CheckpointIO.WriteActionSpace(writer, ActionSpace);
 
             // State map: count + entries
             writer.Write(_stateMap.Count);
@@ -456,6 +460,10 @@ namespace HyperQ.Learners
         {
             int version = reader.ReadInt32();
             int actionCount = reader.ReadInt32();
+            if (version >= 2)
+            {
+                CheckpointIO.ReadActionSpace(reader, ActionSpace);
+            }
 
             // State map
             int stateCount = reader.ReadInt32();

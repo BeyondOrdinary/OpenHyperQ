@@ -5,11 +5,13 @@ using System.Reflection.Emit;
 using System.Text;
 using System.Threading.Tasks;
 using HyperQ.Util;
+using System.IO;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.Learners
 {
     [Serializable]
-    public class MappedQQ<T> : BaseQ<T>
+    public class MappedQQ<T> : BaseQ<T>, ICheckpointable
     {
         private QRandom _random;
         private MappedQ<T> _Q1;
@@ -20,13 +22,15 @@ namespace HyperQ.Learners
 
         public MappedQQ(QActionSpace<int> actionSpace, Func<double> defaultValueAction = null, QRandom ran = null) : base(actionSpace)
         {
+            FeatureGate.Require(HyperQFeatures.LearnerDoubleQ);
             _Q1 = new MappedQ<T>(actionSpace, _StateMap, defaultValueAction);
             _Q2 = new MappedQ<T>(actionSpace, _StateMap, defaultValueAction);
             if (defaultValueAction != null)
             {
                 DefaultValueFunc = defaultValueAction;
             }
-            _random = ran ?? QRandom.Instance;
+            // Decides which table an update goes to.
+            _random = ran ?? actionSpace.Random;
         }
         public override double[,] AsMatrix
         {
@@ -157,7 +161,7 @@ namespace HyperQ.Learners
 
         public override Q<T> Clone()
         {
-            MappedQQ<T> c = new MappedQQ<T>(ActionSpace.Clone(), DefaultValueFunc);
+            MappedQQ<T> c = new MappedQQ<T>(ActionSpace.Clone(), DefaultValueFunc, _random);
             c._Q1 = _Q1.Clone() as MappedQ<T>;
             c._Q2 = _Q2.Clone() as MappedQ<T>;
             return (c);
@@ -270,22 +274,19 @@ namespace HyperQ.Learners
         {
             AddState(s);
             AddState(sprime);
-            double prime_v = this[sprime, aprime];
-            double curr_v = this[s, a];
-            double new_v = curr_v + hp.Alpha * (r + hp.Gamma * prime_v - curr_v);
-            this[s, a] = new_v;
-            Advantage.AddAdvantage(Advantage.AddReturn(new_v, hp.Gamma) - curr_v);
-            /*
+            // Canonical Double-Q (Hasselt 2010), the same scheme as ClassicQQ and DoubleHyperQ: randomly
+            // select which Q to update and evaluate the next state with the other one to reduce the
+            // maximization bias. (This learner used to update the blended value of both tables.)
             NextQ(-1, true);
-            Q<T>[] qq = { _Q1, _Q2 };
-            Q<T> q1 = qq[_WhichQ];
-            Q<T> q2 = qq[(_WhichQ + 1) % 2];
+            MappedQ<T>[] qq = { _Q1, _Q2 };
+            MappedQ<T> q1 = qq[_WhichQ];
+            MappedQ<T> q2 = qq[(_WhichQ + 1) % 2];
             double prime_v = q2.GetValue(sprime, aprime);
             double curr_v = q1.GetValue(s, a);
-            double new_v = curr_v + hp.Alpha * (r + hp.Gamma * prime_v - curr_v);
+            double baseline = QUpdateCore.Baseline(q1.GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             q1.SetValue(s, a, new_v);
-            Advantage.AddAdvantage(Advantage.AddReturn(new_v, hp.Gamma) - curr_v);
-            */
+            _StateArgs.Remove(s); // the cached arg min/max of the blended value is stale now
             return new_v;
         }
         /// <summary>
@@ -303,57 +304,19 @@ namespace HyperQ.Learners
         {
             AddState(s);
             AddState(sprime);
-            int aprime = a;
-            QAction action = null;
-            switch (evalType)
-            {
-                case EvalMethodType.Max:
-                    action = ArgMax(sprime);
-                    break;
-                case EvalMethodType.Min:
-                    action = ArgMin(sprime);
-                    break;
-                default:
-                    action = ArgMax(sprime);
-                    break;
-            }
-            if (action != null)
-                aprime = action.Item1;
-            double prime_v = this[sprime, aprime];
-            double curr_v = this[s, a];
-            double new_v = curr_v + hp.Alpha * (r + hp.Gamma * prime_v - curr_v);
-            this[s, a] = new_v;
-            Advantage.AddAdvantage(Advantage.AddReturn(new_v, hp.Gamma) - curr_v);
-            return new_v;
-            /*
+            // Canonical Double-Q (Hasselt 2010): q1 selects the greedy next action, q2 evaluates it.
             NextQ(-1, true);
-            Q<T>[] qq = { _Q1, _Q2 };
-            Q<T> q1 = qq[_WhichQ];
-            Q<T> q2 = qq[(_WhichQ + 1) % 2];
-            int aprime = a;
-            QAction result = null;
-            switch (evalType)
-            {
-                case EvalMethodType.Max:
-                    result = ArgMax(sprime);
-                    break;
-                case EvalMethodType.Min:
-                    result = ArgMin(sprime);
-                    break;
-                default:
-                    result = ArgMax(sprime);
-                    break;
-            }
-            if (result != null)
-            {
-                aprime = result.Item1;
-            }
+            MappedQ<T>[] qq = { _Q1, _Q2 };
+            MappedQ<T> q1 = qq[_WhichQ];
+            MappedQ<T> q2 = qq[(_WhichQ + 1) % 2];
+            int aprime = QUpdateCore.SelectGreedyAction(sprime, a, evalType, q1.ArgMax, q1.ArgMin);
             double prime_v = q2.GetValue(sprime, aprime);
             double curr_v = q1.GetValue(s, a);
-            double new_v = curr_v + hp.Alpha * (r + hp.Gamma * prime_v - curr_v);
+            double baseline = QUpdateCore.Baseline(q1.GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             q1.SetValue(s, a, new_v);
-            Advantage.AddAdvantage(Advantage.AddReturn(new_v, hp.Gamma) - curr_v);
-            */
+            _StateArgs.Remove(s); // the cached arg min/max of the blended value is stale now
+            return new_v;
         }
         #endregion
         /// <summary>
@@ -412,6 +375,28 @@ namespace HyperQ.Learners
             {
                 SetValue(state, action, value);
             }
+        }
+
+        // ── ICheckpointable ──
+
+        public int CheckpointVersion { get { return 1; } }
+
+        /// <summary>The two tables share one state map, which each table's checkpoint carries and restores.</summary>
+        public void SaveCheckpoint(BinaryWriter writer)
+        {
+            writer.Write(CheckpointVersion);
+            writer.Write(_WhichQ);
+            _Q1.SaveCheckpoint(writer);
+            _Q2.SaveCheckpoint(writer);
+        }
+
+        public void LoadCheckpoint(BinaryReader reader)
+        {
+            int version = reader.ReadInt32();
+            _WhichQ = reader.ReadInt32();
+            _Q1.LoadCheckpoint(reader);
+            _Q2.LoadCheckpoint(reader);
+            _StateArgs.Clear();
         }
     }
 }

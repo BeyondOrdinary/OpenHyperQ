@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.MACE.Training
 {
@@ -21,16 +22,17 @@ namespace HyperQ.MACE.Training
     public class QMemory<T, RT>
     {
         protected List<QMemoryCell<T, RT>> _Memory = new List<QMemoryCell<T, RT>>();
+        /// <summary>The steps remembered since the last <see cref="StartEpisode"/>, for <see cref="ReplayEpisode"/>.</summary>
         protected List<QMemoryCell<T, RT>> _Episode = new List<QMemoryCell<T, RT>>();
         protected int _MaxSize = 500;
         protected QRandom _random;
 
-        public QMemory(int maxSize, QRandom ran = null)
+        /// <param name="ran">The source of the replay and culling draws.</param>
+        public QMemory(int maxSize, QRandom ran)
         {
+            FeatureGate.Require(HyperQFeatures.Mace);
             _MaxSize = maxSize;
-            _random = ran;
-            if (ran == null)
-                _random = QRandom.Instance;
+            _random = ran ?? throw new ArgumentNullException(nameof(ran));
         }
 
         public virtual void StartEpisode()
@@ -58,6 +60,10 @@ namespace HyperQ.MACE.Training
             }
         }
 
+        /// <summary>
+        /// Replays the steps remembered since the last <see cref="StartEpisode"/>, in order: after
+        /// <see cref="EndEpisode"/>, the episode that just ended; during an episode, the episode so far.
+        /// </summary>
         public virtual void ReplayEpisode(HyperParams hp, Func<QMemoryCell<T, RT>, HyperParams, bool> callback)
         {
             foreach (QMemoryCell<T, RT> mem in _Episode)
@@ -92,6 +98,7 @@ namespace HyperQ.MACE.Training
                 _Memory.RemoveAt(0);
             }
             _Memory.Add(m);
+            _Episode.Add(m);
             return (m);
         }
 

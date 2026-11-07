@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -11,7 +11,7 @@ namespace HuntTheWumpus
 {
     public class WumpusHyperGameEnv : WumpusBaseGameEnv, IMACEPvEEnv<QState<decimal>, ScalarReward>
     {
-        public WumpusHyperGameEnv(QRandom ran = null, bool quiet = false) : base(ran, quiet)
+        public WumpusHyperGameEnv(QRandom ran = null, bool quiet = false, int staticSeed = DefaultStaticSeed) : base(ran, quiet, staticSeed: staticSeed)
         {
         }
         public QState<decimal> Discretize()
@@ -24,7 +24,10 @@ namespace HuntTheWumpus
             }
             s.Push(rpt.Location);
             s.Push(rpt.Gold);
-            s.Push(rpt.FoodLevel);
+            if (IncludeFood)
+            {
+                s.Push(rpt.FoodLevel);
+            }
             return s;
         }
     }

@@ -1,4 +1,4 @@
-﻿using HyperQ.Learners;
+using HyperQ.Learners;
 using HyperQ.Util;
 using System;
 using System.Collections.Generic;
@@ -30,7 +30,15 @@ namespace HuntTheWumpus
         public bool layer = false;
         public int warmup_episodes = 0;
         public int memory_size = 500;
-        public int dyna_size = 200;
+        /// <summary>
+        /// Dyna's model: -1 (dyna_size=full, the default) keeps every (s,a), N > 0 keeps the latest N, 0 turns Dyna off.
+        /// In a HuntTheWumpus Dyna study over 20 caves, a full model did better than a small one of recent pairs.
+        /// </summary>
+        public int dyna_size = -1;
+        private static int ParseDynaSize(string v)
+        {
+            return v == "full" ? -1 : int.Parse(v);
+        }
         public int dyna_iters = 500;
         public double dyna_freq = 0.2;
         public bool use_negpos_memory = false;
@@ -39,6 +47,13 @@ namespace HuntTheWumpus
         public string load_fname = null;
         public bool episodic = false;
         public bool obsession = false;
+        /// <summary>The run's seed: the learners' and trainer's random source, and the static cave's layout.</summary>
+        public int seed = WumpusBaseGameEnv.DefaultStaticSeed;
+        public bool seedSet = false;
+        /// <summary>Skip the Q-matrix CSV written for every mind at every evaluation epoch.</summary>
+        public bool nomatrix = false;
+        /// <summary>Leave the food level out of the state.</summary>
+        public bool nofood = false;
         public int max_training_steps = 500;
         public QParam g = new QParamExponential(0.997, 1.0, 0.997);
         public QParam e = new QParamExponential(0.5, 0.999991, 0.05);
@@ -129,6 +144,23 @@ namespace HuntTheWumpus
                 {
                     actionModel = ActionSelectionModel.SoftMax_KL;
                 }
+                else if (cmdline[i] == "model4")
+                {
+                    model = RewardModelType.Model4;
+                }
+                else if (cmdline[i] == "nofood")
+                {
+                    nofood = true;
+                }
+                else if (cmdline[i] == "nomatrix")
+                {
+                    nomatrix = true;
+                }
+                else if (cmdline[i].StartsWith("seed="))
+                {
+                    seed = int.Parse(cmdline[i].Substring(5));
+                    seedSet = true;
+                }
                 else if (cmdline[i] == "episodic")
                 {
                     episodic = true;
@@ -161,12 +193,12 @@ namespace HuntTheWumpus
                 else if (cmdline[i].StartsWith("dyna="))
                 {
                     string[] s = cmdline[i].Substring(idx + 1).Split(',');
-                    dyna_size = int.Parse(s[0]);
+                    dyna_size = ParseDynaSize(s[0]);
                     dyna_iters = int.Parse(s[1]);
                 }
                 else if (cmdline[i].StartsWith("dyna_size="))
                 {
-                    dyna_size = int.Parse(cmdline[i].Substring(idx + 1));
+                    dyna_size = ParseDynaSize(cmdline[i].Substring(idx + 1));
                 }
                 else if (cmdline[i].StartsWith("dyna_iters="))
                 {
@@ -223,7 +255,7 @@ namespace HuntTheWumpus
                 Console.WriteLine("LAYERED HYPER enabled");
             if (use_negpos_memory)
                 Console.WriteLine("NEGPOS memory enabled");
-            Console.WriteLine("Dyna enabled {0}", dyna_size);
+            Console.WriteLine("Dyna enabled {0}", dyna_size < 0 ? "full model" : dyna_size.ToString());
             Console.WriteLine("Dyna freq {0}", dyna_freq);
             Console.WriteLine("Memory enabled {0} {1}", memory_size, episodic ? "EPISODIC" : "");
             Console.WriteLine("warmups enabled {0}", warmup_episodes);
@@ -234,6 +266,7 @@ namespace HuntTheWumpus
             }
             if (randomize)
                 Console.WriteLine("Randomizing training Worlds");
+            Console.WriteLine("Seed {0}", seed);
         }
     }
     internal class Program

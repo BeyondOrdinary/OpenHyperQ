@@ -27,7 +27,12 @@ namespace HyperQ.Learners
             _stateMapper = mapper;
         }
 
-        /// <summary>Convenience 1-arg ctor — creates internal MemoryBackedHyperMapper&lt;T&gt;.</summary>
+        /// <summary>
+        /// Retired: it gave the selector a state mapper of its own, but the trainer hands ApplyAdvantage the learner's
+        /// state index, so once the two numberings diverge (a warm-up, a terminal next state, an evaluation episode)
+        /// the policy learned for one state is applied to another. Pass the learner as the mapper instead.
+        /// </summary>
+        [Obsolete("Pass the learner as the state mapper: new PolicyGradientActionSelector<T>(learner, actionSpace). The trainer hands ApplyAdvantage the learner's state index, so a selector with a mapper of its own applies each learned policy to the wrong state.", true)]
         public PolicyGradientActionSelector(QActionSpace<int> actionSpace)
             : this(new MemoryMapperAdapter<T>(), actionSpace) { }
 
@@ -68,13 +73,17 @@ namespace HyperQ.Learners
                 }
             }
             double objective = logit.Objective((int)a.Index, advantage, hp.Omega);
-            double g = (1.0 - logit.Probability((int)a.Index)) * objective; // This should be cumulative
-            logit[(int)a.Index] += hp.Alpha * g;
+            // Softmax policy gradient: d log pi(a)/d theta_a = 1 - pi(a) and d log pi(a)/d theta_i = -pi(i).
+            // The gradient is taken at the policy before this step, so snapshot the probabilities first.
+            // The indexer reads and writes the logit, so each step is a plain += on it.
             RunningNormalizer priors = logit.LockPriors();
+            int taken = (int)a.Index;
+            double g = (1.0 - priors[taken]) * objective; // This should be cumulative
+            logit[taken] += hp.Alpha * g;
             // -p*Objective is the counter update
             foreach(int i in priors.Keys)
             {
-                if (i == a.Index)
+                if (i == taken)
                     continue;
                 logit[i] -= hp.Alpha * priors[i] * objective * hp.PenaltyAnnealingFactor;
             }
@@ -141,7 +150,7 @@ namespace HyperQ.Learners
                 double p_max = -1.0;
                 for (uint a = 0; a < _actionSpace.NumberOfKnownActions; a++)
                 {
-                    double p = rl[(int)a];
+                    double p = rl.Probability((int)a);
                     if (p > p_max)
                     {
                         p_max = p;
@@ -157,7 +166,7 @@ namespace HyperQ.Learners
                 double p_min = 1.0;
                 for (uint a = 0; a < _actionSpace.NumberOfKnownActions; a++)
                 {
-                    double p = rl[(int)a];
+                    double p = rl.Probability((int)a);
                     if (p < p_min)
                     {
                         p_min = p;
@@ -173,7 +182,7 @@ namespace HyperQ.Learners
                 double cumulative = 0f;
                 for (uint a = 0; a < _actionSpace.NumberOfKnownActions; a++)
                 {
-                    double p = rl[(int)a];
+                    double p = rl.Probability((int)a);
                     cumulative += p;
                     if (roll < cumulative)
                     {

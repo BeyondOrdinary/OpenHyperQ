@@ -4,11 +4,13 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using HyperQ.Util;
+using System.IO;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.Learners
 {
     [Serializable]
-    public class SingleHyperQ<T> : IHyperQ<T>
+    public class SingleHyperQ<T> : IHyperQ<T>, ICheckpointable
     {
         public QAdvantage Advantage { get; private set; } = null;
 
@@ -49,6 +51,7 @@ namespace HyperQ.Learners
         /// <param name="defaultValueAction">The lazy action initializer</param>
         public SingleHyperQ(QActionSpace<int> actionSpace, Func<double> defaultValueAction = null)
         {
+            FeatureGate.Require(HyperQFeatures.LearnerHyperQ);
             ActionSpace = actionSpace;
             if (defaultValueAction != null)
             {
@@ -134,45 +137,39 @@ namespace HyperQ.Learners
         }
         private double[,] makeQ()
         {
-            uint rows = _StateIndexStart;
-            if (_data != null)
-            {
-                rows += (uint)_data.Count;
-            }
-            double[,] qq = new double[rows, ActionSpace.MaximumNumberOfActions];
+            // Snapshot the row count and the action count once. Visualizers read this matrix from
+            // another thread while training keeps adding rows; re-reading _data.Count inside the loop
+            // would walk past the rows that were allocated and throw IndexOutOfRangeException.
+            List<QRow> data = _data;
+            int nrows = data != null ? data.Count : 0;
+            uint maxActions = ActionSpace.MaximumNumberOfActions;
+            double[,] qq = new double[_StateIndexStart + nrows, _ActionIndexStart + maxActions];
             // Copy the original Q
-            if (_StateIndexStart > 0)
+            if (_StateIndexStart > 0 && _Q != null)
             {
-                _Q.CopyTo(qq, 0);
-            }
-            if (_data != null)
-            {
-                // There is a Unhandled Exception: System.NotSupportedException: Incongruent matrix merge is not supported: Q1=47248 Q2=47256
-                for (uint j = 0; j < _data.Count; j++)
+                int qrows = Math.Min(_Q.GetLength(0), (int)_StateIndexStart);
+                int qcols = Math.Min(_Q.GetLength(1), qq.GetLength(1));
+                for (int j = 0; j < qrows; j++)
                 {
-                    QRow row = _data[(int)j];
-                    for (uint i = 0; i < ActionSpace.MaximumNumberOfActions; i++)
+                    for (int i = 0; i < qcols; i++)
                     {
-                        // The action rows may not have all of the mapped actions. When there is no action for that
-                        // state (row), use the default value action.
-                        double v = 0.0;
-                        if (!row.ContainsKey(i))
-                        {
-                            if (DefaultValueFunc != null)
-                            {
-                                v = DefaultValueFunc();
-                            }
-                            else
-                            {
-                                v = 0.0;
-                            }
-                        }
-                        else
-                        {
-                            v = row[i];
-                        }
-                        qq[j + _StateIndexStart, i + _ActionIndexStart] = v;
+                        qq[j, i] = _Q[j, i];
                     }
+                }
+            }
+            for (int j = 0; j < nrows; j++)
+            {
+                QRow row = data[j];
+                for (uint i = 0; i < maxActions; i++)
+                {
+                    // The action rows may not have all of the mapped actions. When there is no action for that
+                    // state (row), use the default value action.
+                    double v;
+                    if (row == null || !row.TryGetValue(i, out v))
+                    {
+                        v = DefaultValueFunc != null ? DefaultValueFunc() : 0.0;
+                    }
+                    qq[j + _StateIndexStart, i + _ActionIndexStart] = v;
                 }
             }
             return (qq);
@@ -181,7 +178,7 @@ namespace HyperQ.Learners
         {
             SingleHyperQ<T> newQ = new SingleHyperQ<T>(ActionSpace.Clone(), DefaultValueFunc);
             newQ._Q = makeQ();
-            newQ._StateIndexStart = _StateIndexStart + (uint)_data.Count;
+            newQ._StateIndexStart = _StateIndexStart + (uint)(_data != null ? _data.Count : 0);
             newQ._ActionIndexStart = _ActionIndexStart + ActionSpace.MaximumNumberOfActions;
             newQ._StateMap = _StateMap.Clone();
             return (newQ);
@@ -346,6 +343,85 @@ namespace HyperQ.Learners
         }
 
         /// <summary>
+        /// Sets the value of (s, a). A single table is the only estimate, so this is SetValue.
+        /// </summary>
+        public virtual void InitializeValue(QState<T> stateKey, int action, double v)
+        {
+            SetValue(stateKey, action, v);
+        }
+
+        public virtual IEnumerable<KeyValuePair<uint, double>> KnownActionValues(QState<T> stateKey)
+        {
+            if (!_StateMap.Known(stateKey.Enumerator))
+            {
+                return Enumerable.Empty<KeyValuePair<uint, double>>();
+            }
+            return KnownActionValuesAt(_StateMap[stateKey.Enumerator]);
+        }
+
+        /// <summary>
+        /// Enumerates the (action index, Q value) pairs recorded for the given state index. The keys are
+        /// action-space indexes (what <see cref="QActionSpace{T}.ToIndex"/> returns), so the enumeration
+        /// position must never be used as the action index: rows fill in the order actions are first tried.
+        /// </summary>
+        /// <param name="ix">The state index in the state map</param>
+        internal IEnumerable<KeyValuePair<uint, double>> KnownActionValuesAt(uint ix)
+        {
+            if (ix < _StateIndexStart)
+            {
+                if (_Q != null)
+                {
+                    for (uint i = 0; i < _Q.GetLength(1); i++)
+                    {
+                        yield return new KeyValuePair<uint, double>(i, _Q[ix, i]);
+                    }
+                }
+                yield break;
+            }
+            ix -= _StateIndexStart;
+            List<QRow> data = _data;
+            if (data == null || ix >= data.Count)
+            {
+                yield break;
+            }
+            QRow row = data[(int)ix];
+            if (row == null)
+            {
+                yield break;
+            }
+            foreach (KeyValuePair<uint, double> kv in row)
+            {
+                yield return new KeyValuePair<uint, double>(kv.Key + _ActionIndexStart, kv.Value);
+            }
+        }
+
+        /// <summary>
+        /// Returns the cached min/max for the state, computing it from every known (action, value) pair when
+        /// the cache has no entry. Returns null when nothing is known about the state.
+        /// </summary>
+        private QArg<double> StateArgsFor(uint ix)
+        {
+            QArg<double> arg;
+            if (_StateArgs.TryGetValue(ix, out arg))
+            {
+                return arg;
+            }
+            arg = new QArg<double>();
+            bool found = false;
+            foreach (KeyValuePair<uint, double> kv in KnownActionValuesAt(ix))
+            {
+                arg.Set(kv.Value, ActionSpace.FromIndex(kv.Key));
+                found = true;
+            }
+            if (!found)
+            {
+                return null;
+            }
+            _StateArgs[ix] = arg;
+            return arg;
+        }
+
+        /// <summary>
         /// Returns the action index and Q value for that action that is the maximum average value from all
         /// of the Q learners in this ensemble.
         /// </summary>
@@ -354,27 +430,10 @@ namespace HyperQ.Learners
         public virtual QAction ArgMax(QState<T> stateKey)
         {
             uint ix = _StateMap[stateKey.Enumerator];
-            if (_StateArgs.ContainsKey(ix))
-            {
-                QArg<double> arg = _StateArgs[ix];
-                return new QAction(arg.MaxIndex, arg.Max, ActionSpace.ToIndex(arg.MaxIndex));
-            }
-            double[] r = GetKnownActionArray(stateKey);
-            if (r == null || r.Length == 0)
+            QArg<double> arg = StateArgsFor(ix);
+            if (arg == null)
                 return null;
-            double dmax = r[0];
-            uint imax = 0;
-            for (uint i = 1; i < r.Length; i++)
-            {
-                if (r[i] > dmax)
-                {
-                    dmax = r[i];
-                    imax = i;
-                }
-            }
-            int action = ActionSpace.FromIndex(imax);
-            _StateArgs[ix] = new QArg<double>(dmax, action);
-            return new QAction(action, dmax,imax);
+            return new QAction(arg.MaxIndex, arg.Max, ActionSpace.ToIndex(arg.MaxIndex));
         }
 
         /// <summary>
@@ -386,27 +445,10 @@ namespace HyperQ.Learners
         public virtual QAction ArgMin(QState<T> stateKey)
         {
             uint ix = _StateMap[stateKey.Enumerator];
-            if (_StateArgs.ContainsKey(ix))
-            {
-                QArg<double> arg = _StateArgs[ix];
-                return new QAction(arg.MinIndex, arg.Min, ActionSpace.ToIndex(arg.MinIndex));
-            }
-            double[] r = GetKnownActionArray(stateKey);
-            if (r == null || r.Length == 0)
+            QArg<double> arg = StateArgsFor(ix);
+            if (arg == null)
                 return null;
-            double dmin = r[0];
-            uint imin = 0;
-            for (uint i = 1; i < r.Length; i++)
-            {
-                if (r[i] < dmin)
-                {
-                    dmin = r[i];
-                    imin = i;
-                }
-            }
-            int action = ActionSpace.FromIndex(imin);
-            _StateArgs[ix] = new QArg<double>(dmin, action);
-            return new QAction(action, dmin,imin);
+            return new QAction(arg.MinIndex, arg.Min, ActionSpace.ToIndex(arg.MinIndex));
         }
 
 
@@ -416,7 +458,8 @@ namespace HyperQ.Learners
             AddState(sprime);
             double prime_v = this[sprime, aprime];
             double curr_v = this[s, a];
-            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage);
+            double baseline = QUpdateCore.Baseline(GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             this[s, a] = new_v;
             return new_v;
         }
@@ -427,7 +470,8 @@ namespace HyperQ.Learners
             int aprime = QUpdateCore.SelectGreedyAction(sprime, a, evalType, ArgMax, ArgMin);
             double prime_v = this[sprime, aprime];
             double curr_v = this[s, a];
-            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage);
+            double baseline = QUpdateCore.Baseline(GetActionArray(s));
+            double new_v = QUpdateCore.UpdateAndTrack(curr_v, prime_v, r, hp, Advantage, baseline);
             this[s, a] = new_v;
             return new_v;
         }
@@ -493,6 +537,44 @@ namespace HyperQ.Learners
                 snap[s] = GetActionArray(s);
             }
             return snap;
+        }
+
+        // ── ICheckpointable ──
+
+        /// <summary>
+        /// Serializer for the elements of the composite state keys in checkpoints; set it for an element type
+        /// without a built-in serializer (see <see cref="QKeySerializerFactory"/>).
+        /// </summary>
+        public virtual IQKeySerializer<T> KeySerializer { get; set; }
+
+        private IQKeySerializer<T> Keys
+        {
+            get { return KeySerializer ?? (KeySerializer = QKeySerializerFactory.GetDefault<T>()); }
+        }
+
+        public int CheckpointVersion { get { return 1; } }
+
+        public virtual void SaveCheckpoint(BinaryWriter writer)
+        {
+            writer.Write(CheckpointVersion);
+            CheckpointIO.WriteActionSpace(writer, ActionSpace);
+            _StateMap.SaveCheckpoint(writer, Keys);
+            writer.Write(_StateIndexStart);
+            writer.Write(_ActionIndexStart);
+            CheckpointIO.WriteMatrix(writer, _Q);
+            CheckpointIO.WriteRows(writer, _data);
+        }
+
+        public virtual void LoadCheckpoint(BinaryReader reader)
+        {
+            int version = reader.ReadInt32();
+            CheckpointIO.ReadActionSpace(reader, ActionSpace);
+            _StateMap.LoadCheckpoint(reader, Keys);
+            _StateIndexStart = reader.ReadUInt32();
+            _ActionIndexStart = reader.ReadUInt32();
+            _Q = CheckpointIO.ReadMatrix(reader);
+            _data = CheckpointIO.ReadRows(reader);
+            _StateArgs.Clear();
         }
     }
 }

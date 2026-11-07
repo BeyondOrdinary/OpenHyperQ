@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Linq;
 using static System.Collections.Specialized.BitVector32;
 using HyperQ.Util;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.MACE.Training
 {
@@ -22,7 +23,7 @@ namespace HyperQ.MACE.Training
     public class MACEPvESARSATrainer<T,RT> : ITrainingEvents where RT : IReward
     {
         private List<MACEMind<T>> _Minds = new List<MACEMind<T>>();
-        protected QRandom _random = QRandom.Instance;
+        protected QRandom _random;
         public int MaxIterations { get; set; } = 0;
         protected QEvalType _EvalType = QEvalType.OnPolicy;
         public bool WarmupEnabled { get; set; } = false;
@@ -43,12 +44,12 @@ namespace HyperQ.MACE.Training
         public event Action OnMemoryReplayStart;
         public event Action OnMemoryReplayEnd;
 
-        public MACEPvESARSATrainer(QEvalType evalType = QEvalType.OnPolicy, QRandom ran = null)
+        /// <param name="ran">The source of the trainer's own draws (Dyna, memory replay). The trainer has no
+        /// action space of its own to fall back to, so it must be given one.</param>
+        public MACEPvESARSATrainer(QRandom ran, QEvalType evalType = QEvalType.OnPolicy)
         {
-            if (ran != null)
-            {
-                _random = ran;
-            }
+            FeatureGate.Require(HyperQFeatures.Mace);
+            _random = ran ?? throw new ArgumentNullException(nameof(ran));
             _EvalType = evalType;
         }
 
@@ -105,7 +106,9 @@ namespace HyperQ.MACE.Training
         }
         protected virtual void Hallucinate(HyperParams hp)
         {
-            if (Dyna == null || Dyna.DynaIterations == 0)
+            // The model can still be empty on the first steps: a planning frequency above the model update
+            // frequency plans on steps that did not update the model.
+            if (Dyna == null || Dyna.DynaIterations == 0 || Dyna.Count == 0)
             {
                 return;
             }
@@ -384,6 +387,11 @@ namespace HyperQ.MACE.Training
                 }
                 last_sa = new Tuple<T, QAction[]>(s, action);
                 action = aprime;
+                // Give the next step its own array. Reusing 'aprime' would alias 'action', so the
+                // next SelectAction would overwrite the action that was actually taken before the
+                // SARSA update runs, and every remembered (s,a) and Dyna entry would share the same
+                // mutating array.
+                aprime = new QAction[_Minds.Count];
                 s = sprime;
                 iter++;
                 if (WarmupEnabled)
@@ -457,12 +465,13 @@ namespace HyperQ.MACE.Training
             T s = env.Discretize();
             int iter = 0;
             env.Render();
-            QAction[] a = new QAction[_Minds.Count];
             while (!done)
             {
                 if (!WarmupEnabled)
                     env.Metrics.StartAction();
                 OnStepStart?.Invoke();
+                // A fresh array per step: the replay memory and the Dyna model keep a reference to it.
+                QAction[] a = new QAction[_Minds.Count];
                 for (int i = 0; i < _Minds.Count; i++)
                 {
                     a[i] = _Minds[i].ActionSelector.SelectAction(_Minds[i].Mind, s, hp.Epsilon);

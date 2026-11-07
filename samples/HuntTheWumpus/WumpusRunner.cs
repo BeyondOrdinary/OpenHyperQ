@@ -19,11 +19,11 @@ namespace HuntTheWumpus
         public QQRunner(int numepisodes, HyperParams h = null) : base(numepisodes, h) { }
         protected override Q<decimal> CreateLearner(QActionSpace<int> actionSpace)
         {
-            return new MappedQQ<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction, ran: _TheRandom);
+            return new MappedQQ<decimal>(actionSpace, _Random.DefaultRandomAction, ran: _TheRandom);
         }
         protected override WumpusBaseGameEnv CreateWorld()
         {
-            WumpusGameEnv world = new WumpusGameEnv(ran: _TheRandom, quiet: Quiet);
+            WumpusGameEnv world = new WumpusGameEnv(ran: _TheRandom, quiet: Quiet, staticSeed: WorldSeed);
             world.Metrics = new EnvMetrics(noHistory: true);
             return (world);
         }
@@ -33,11 +33,11 @@ namespace HuntTheWumpus
         public HyperQQRunner(int numepisodes, HyperParams h = null) : base(numepisodes, h) { }
         protected override Q<QState<decimal>> CreateLearner(QActionSpace<int> actionSpace)
         {
-            return new DoubleHyperQ<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction, ran: _TheRandom);
+            return new DoubleHyperQ<decimal>(actionSpace, _Random.DefaultRandomAction, ran: _TheRandom);
         }
         protected override WumpusBaseGameEnv CreateWorld()
         {
-            WumpusHyperGameEnv world = new WumpusHyperGameEnv(ran: _TheRandom, quiet: Quiet);
+            WumpusHyperGameEnv world = new WumpusHyperGameEnv(ran: _TheRandom, quiet: Quiet, staticSeed: WorldSeed);
             world.Metrics = new EnvMetrics(noHistory: true);
             return (world);
         }
@@ -47,11 +47,11 @@ namespace HuntTheWumpus
         public QRunner(int numepisodes, HyperParams h = null) : base(numepisodes, h) { }
         protected override Q<decimal> CreateLearner(QActionSpace<int> actionSpace)
         {
-            return new MappedQ<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction);
+            return new MappedQ<decimal>(actionSpace, _Random.DefaultRandomAction);
         }
         protected override WumpusBaseGameEnv CreateWorld()
         {
-            WumpusGameEnv world = new WumpusGameEnv(ran: _TheRandom, quiet: Quiet);
+            WumpusGameEnv world = new WumpusGameEnv(ran: _TheRandom, quiet: Quiet, staticSeed: WorldSeed);
             world.Metrics = new EnvMetrics(noHistory: false);
             return (world);
         }
@@ -61,11 +61,11 @@ namespace HuntTheWumpus
         public HyperQRunner(int numepisodes, HyperParams h = null) : base(numepisodes, h) { }
         protected override Q<QState<decimal>> CreateLearner(QActionSpace<int> actionSpace)
         {
-            return new SingleHyperQ<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction);
+            return new SingleHyperQ<decimal>(actionSpace, _Random.DefaultRandomAction);
         }
         protected override WumpusBaseGameEnv CreateWorld()
         {
-            WumpusHyperGameEnv world = new WumpusHyperGameEnv(ran: _TheRandom, quiet: Quiet);
+            WumpusHyperGameEnv world = new WumpusHyperGameEnv(ran: _TheRandom, quiet: Quiet, staticSeed: WorldSeed);
             world.Metrics = new EnvMetrics(noHistory: false);
             return (world);
         }
@@ -75,12 +75,12 @@ namespace HuntTheWumpus
         public LayeredHyperQRunner(int numepisodes, HyperParams h = null) : base(numepisodes, h) { }
         protected override Q<QState<decimal>> CreateLearner(QActionSpace<int> actionSpace)
         {
-            SingleQGenerator<decimal> g = new SingleQGenerator<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction);
+            SingleQGenerator<decimal> g = new SingleQGenerator<decimal>(actionSpace, _Random.DefaultRandomAction);
             return new LayeredHyperQ<decimal>(g.HyperQGenerator, actionSpace);
         }
         protected override WumpusBaseGameEnv CreateWorld()
         {
-            WumpusHyperGameEnv world = new WumpusHyperGameEnv(ran: _TheRandom, quiet: Quiet);
+            WumpusHyperGameEnv world = new WumpusHyperGameEnv(ran: _TheRandom, quiet: Quiet, staticSeed: WorldSeed);
             world.Metrics = new EnvMetrics(noHistory: false);
             return (world);
         }
@@ -90,12 +90,12 @@ namespace HuntTheWumpus
         public LayeredHyperQQRunner(int numepisodes, HyperParams h = null) : base(numepisodes, h) { }
         protected override Q<QState<decimal>> CreateLearner(QActionSpace<int> actionSpace)
         {
-            DoubleQGenerator<decimal> g = new DoubleQGenerator<decimal>(actionSpace, QRandom.Instance.DefaultRandomAction, ran: _TheRandom);
+            DoubleQGenerator<decimal> g = new DoubleQGenerator<decimal>(actionSpace, _Random.DefaultRandomAction, ran: _TheRandom);
             return new LayeredHyperQ<decimal>(g.HyperGenerator, actionSpace);
         }
         protected override WumpusBaseGameEnv CreateWorld()
         {
-            WumpusHyperGameEnv world = new WumpusHyperGameEnv(ran: _TheRandom, quiet: Quiet);
+            WumpusHyperGameEnv world = new WumpusHyperGameEnv(ran: _TheRandom, quiet: Quiet, staticSeed: WorldSeed);
             world.Metrics = new EnvMetrics(noHistory: false);
             return (world);
         }
@@ -244,7 +244,15 @@ namespace HuntTheWumpus
     [Serializable]
     public abstract class WumpusRunner<T> : IWumpusRunner
     {
-        protected QRandom _TheRandom = null; // QRandom.Instance.Ran
+        /// <summary>
+        /// The world's random source. Null gives each world its own static seed, so it rebuilds the same cave on
+        /// every reset; the randomize option hands the world the run's source instead.
+        /// </summary>
+        protected QRandom _TheRandom = null;
+        /// <summary>The static cave's seed (option seed=).</summary>
+        protected int WorldSeed = WumpusBaseGameEnv.DefaultStaticSeed;
+        /// <summary>One row per greedy evaluation: wumpus-eval.csv.</summary>
+        private StreamWriter _EvalCsv = null;
         public int NumEpisodes { get; private set; }
         public WumpusBaseGameEnv World { get; private set; }
         protected MACEMind<T>[] _Q;
@@ -281,10 +289,15 @@ namespace HuntTheWumpus
         public object TheLearner { get { return Learner; } }
         public object TheSelector { get { return Selector; } }
 
+        /// <summary>
+        /// The run's random source: the action spaces, learners, world, trainer and memory draw from it, so a
+        /// run is reproducible from this seed.
+        /// </summary>
+        protected readonly QRandom _Random = new QRandom(903387237);
+
         public WumpusRunner(int numepisodes, HyperParams h = null)
         {
             NumEpisodes = numepisodes;
-            QRandom.Instance.Seed(903387237);
             if (h != null)
             {
                 Hypers = h;
@@ -294,10 +307,10 @@ namespace HuntTheWumpus
         protected abstract Q<T> CreateLearner(QActionSpace<int> actionSpace);
         protected abstract WumpusBaseGameEnv CreateWorld();
 
-        private void EvaluateIt(bool quiet = false)
+        private void EvaluateIt(bool quiet = false, string episode = null)
         {
             MACEEvaluator<T, ScalarReward> eval = null;
-            eval = new MACEEvaluator<T, ScalarReward>(QRandom.Instance);
+            eval = new MACEEvaluator<T, ScalarReward>();
             foreach (MACEMind<T> q in _Q)
             {
                 q.ActionSelector.ActionMode = MinMaxActionEnum.MostProbable;
@@ -313,6 +326,12 @@ namespace HuntTheWumpus
             HyperParams hpz = new HyperParams(g: 0.997, e: 0.0, a: 1, edecay: 1, adecay: 1, min_epsilon: 0.0, min_alpha: 1);
             eval.Episode((IMACEPvEEnv<T, ScalarReward>)World, hpz);
             Console.WriteLine("Ending evaluation with total reward {0} in {1} states and {2} actions.", World.Metrics.TotalReward, World.Metrics.NumberOfStatesVisited, World.Metrics.NumberOfActionsTaken);
+            if (_EvalCsv != null && episode != null)
+            {
+                WumpusGameStatus rpt = World.Report;
+                _EvalCsv.WriteLine("{0},{1},{2},{3},{4},{5}", episode, World.Status, World.Metrics.TotalReward, World.Metrics.NumberOfActionsTaken, rpt.Gold, rpt.FoodLevel);
+                _EvalCsv.Flush();
+            }
             foreach (MACEMind<T> q in _Q)
             {
                 q.ActionSelector.ActionMode = MinMaxActionEnum.Default;
@@ -336,17 +355,18 @@ namespace HuntTheWumpus
                     Console.WriteLine("  output step = {0}", args.epStep);
                     Console.WriteLine("  warmup = {0}", args.warmup_episodes);
                     Console.WriteLine("  memory = {0} {1}", args.memory_size, args.use_negpos_memory ? "neg/pos" : "all");
-                    Console.WriteLine("  dyna = {0} @ {1:F3}", args.dyna_size, args.dyna_freq);
+                    Console.WriteLine("  dyna = {0} @ {1:F3}", args.dyna_size < 0 ? "full" : args.dyna_size.ToString(), args.dyna_freq);
                     if (World == null)
                     {
                         World = CreateWorld();
                         World.RewardModel = args.model;
+                        World.IncludeFood = !args.nofood;
                         World.Dimensions = args.Dimensions;
                         World.Reset();
                         Console.WriteLine("Created the simulation world.");
                     }
                     IActionSelector<T> selector = null;
-                    MACEPvESARSATrainer<T, ScalarReward> s = new MACEPvESARSATrainer<T, ScalarReward>(evalType, QRandom.Instance);
+                    MACEPvESARSATrainer<T, ScalarReward> s = new MACEPvESARSATrainer<T, ScalarReward>(_Random, evalType);
                     Model = s;
                     s.OnStepEnd += () => OnStepEnd?.Invoke();
                     s.OnEpisodeStart += () => OnEpisodeStart?.Invoke();
@@ -355,9 +375,9 @@ namespace HuntTheWumpus
                         _Q = new MACEMind<T>[numActions.Length];
                     for (int i = 0; i < numActions.Length; i++)
                     {
-                        HuntTheWumpusActionSpace ras = new HuntTheWumpusActionSpace(QRandom.Instance, numActions[i]);
+                        HuntTheWumpusActionSpace ras = new HuntTheWumpusActionSpace(_Random, numActions[i]);
                         Q<T> learner = CreateLearner(ras);
-                        // selector = new MostProbableMaxActionSelector<T>((int)learner.MaxNumActions, QRandom.Instance.Ran);
+                        // selector = new MostProbableMaxActionSelector<T>((int)learner.MaxNumActions, _Random.Ran);
                         if (args.actionModel == ActionSelectionModel.eGreedy)
                             selector = new eGreedyActionSelector<T>(ras);
                         else if (args.actionModel == ActionSelectionModel.PolicyGradient)
@@ -414,6 +434,7 @@ namespace HuntTheWumpus
                         };
                         s.Add(_Q[i]);
                     }
+                    ApplyPendingLoad();
                     IMACEPvEEnv<T, ScalarReward> env = (IMACEPvEEnv<T, ScalarReward>)World;
                     if (args.memory_size > 0)
                     {
@@ -421,21 +442,21 @@ namespace HuntTheWumpus
                         if (args.episodic)
                         {
                             if (args.use_negpos_memory)
-                                mem = new QEpisodicNegPosMemory<T, ScalarReward>(args.memory_size, QRandom.Instance);
+                                mem = new QEpisodicNegPosMemory<T, ScalarReward>(args.memory_size, _Random);
                             else
-                                mem = new QEpisodicMemory<T, ScalarReward>(args.memory_size, QRandom.Instance);
+                                mem = new QEpisodicMemory<T, ScalarReward>(args.memory_size, _Random);
                         }
                         else
                         {
                             if (args.use_negpos_memory)
-                                mem = new QNegPosMemory<T, ScalarReward>(args.memory_size, QRandom.Instance);
+                                mem = new QNegPosMemory<T, ScalarReward>(args.memory_size, _Random);
                             else
-                                mem = new QMemory<T, ScalarReward>(args.memory_size, QRandom.Instance);
+                                mem = new QMemory<T, ScalarReward>(args.memory_size, _Random);
                         }
                         s.EnableMemory(mem);
                     }
-                    if (args.dyna_size > 0)
-                        s.EnableDyna(new DynaState<T, ScalarReward>(args.dyna_iters, args.dyna_size), args.dyna_freq);
+                    if (args.dyna_size != 0)
+                        s.EnableDyna(new DynaState<T, ScalarReward>(args.dyna_iters, Math.Max(0, args.dyna_size)), args.dyna_freq);
                     HyperParams hp = new HyperParams(Hypers);
                     s.InTraining = true;
                     if (args.warmup_episodes > 0)
@@ -500,6 +521,11 @@ namespace HuntTheWumpus
                                 foreach (MACEMind<T> mind in _Q)
                                 {
                                     Console.WriteLine("Mind {1} Took {0:N0} random acts...", mind.ActionSelector.RandomActionCount, i / args.epStep, mm);
+                                    if (args.nomatrix)
+                                    {
+                                        mm++;
+                                        continue;
+                                    }
                                     try
                                     {
                                         double[,] matrix = mind.Mind.AsMatrix;
@@ -529,7 +555,7 @@ namespace HuntTheWumpus
                                 {
                                     Console.SetOut(swout2);
                                     // Evaluate
-                                    EvaluateIt(false);
+                                    EvaluateIt(false, (i + 1).ToString());
                                 }
                                 Console.SetOut(swout);
                             }
@@ -567,22 +593,71 @@ namespace HuntTheWumpus
             OnRunComplete?.Invoke();
         }
 
+        private string _PendingLoad = null;
+
+        /// <summary>
+        /// Saves the minds (learners and stateful selectors) as a HyperQ checkpoint. A name ending in .gz is
+        /// written compressed; any other name gets .gz appended.
+        /// </summary>
         public void Save(string fname)
         {
-            throw new NotSupportedException("Wumpus checkpoints need a typed .NET 10 serializer. BinaryFormatter has been removed from the OSS build.");
+            if (_Q == null)
+            {
+                Console.WriteLine("Nothing to save: the minds have not been created yet.");
+                return;
+            }
+            string path = fname.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) ? fname : fname + ".gz";
+            MACECheckpoint.SaveFile(path, _Q);
+            Console.WriteLine("Saved the checkpoint of {0} minds to {1}", _Q.Length, path);
         }
 
+        /// <summary>
+        /// Schedules a checkpoint to be restored into the minds once Run has created them from the options: a
+        /// checkpoint holds learned state, not the learner configuration.
+        /// </summary>
         public void Load(string fname)
         {
-            throw new NotSupportedException("Wumpus checkpoints need a typed .NET 10 serializer. BinaryFormatter has been removed from the OSS build.");
+            if (!File.Exists(fname) && File.Exists(fname + ".gz"))
+            {
+                fname += ".gz";
+            }
+            if (!File.Exists(fname))
+            {
+                Console.WriteLine("Checkpoint {0} does not exist. Ignoring.", fname);
+                return;
+            }
+            _PendingLoad = fname;
+        }
+
+        private void ApplyPendingLoad()
+        {
+            if (_PendingLoad == null || _Q == null)
+            {
+                return;
+            }
+            try
+            {
+                MACECheckpoint.LoadFile(_PendingLoad, _Q);
+                Console.WriteLine("Loaded the Q state from {0}", _PendingLoad);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("OOPS, {0} could not be loaded into the configured learners ({1}). Ignoring.", _PendingLoad, ex.Message);
+            }
+            _PendingLoad = null;
         }
 
         // int epStep, int warmup_episodes = 0, int memory_size = 500, int dyna_size = 200, bool use_negpos_memory = false, double dyna_freq = 0.2, QEvalType evalType = QEvalType.OffPolicy, int max_training_steps = 500, bool use_episodic_memory = false
         public void Run(ProgramArgs args)
         {
+            if (args.seedSet)
+            {
+                _Random.Seed(args.seed);
+                WorldSeed = args.seed;
+            }
             if (args.randomize)
             {
-                this._TheRandom = QRandom.Instance;
+                this._TheRandom = _Random;
             }
             QEvalType evalType = QEvalType.OffPolicy;
             if (args.onpolicy)
@@ -614,13 +689,17 @@ namespace HuntTheWumpus
             }
             else
             {
+                _EvalCsv = new StreamWriter("wumpus-eval.csv");
+                _EvalCsv.WriteLine("episode,status,reward,actions,gold,food");
                 TrainIt(args);
                 using (StreamWriter swout = new StreamWriter($"wumpus-eval-final-{NumEpisodes}x{args.epStep}-{evalType}.log"))
                 {
                     Console.SetOut(swout);
                     // Evaluate
-                    EvaluateIt(false);
+                    EvaluateIt(false, "final");
                 }
+                _EvalCsv.Dispose();
+                _EvalCsv = null;
             }
             // Reset the console output
             Console.SetOut(console);

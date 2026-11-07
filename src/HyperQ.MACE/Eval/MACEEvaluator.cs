@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using HyperQ.Learners;
 using HyperQ.Env;
 using HyperQ.Util;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.MACE.Eval
 {
@@ -18,15 +19,11 @@ namespace HyperQ.MACE.Eval
     public class MACEEvaluator<T,RT> where RT : IReward
     {
         private List<MACEMind<T>> _Minds = new List<MACEMind<T>>();
-        protected QRandom _random = QRandom.Instance;
         public int MaxIterations { get; set; } = 0;
 
-        public MACEEvaluator(QRandom ran = null)
+        public MACEEvaluator()
         {
-            if (ran != null)
-            {
-                _random = ran;
-            }
+            FeatureGate.Require(HyperQFeatures.Mace);
         }
 
         public virtual void Add(Q<T> m, IActionSelector<T> actionSelector = null)

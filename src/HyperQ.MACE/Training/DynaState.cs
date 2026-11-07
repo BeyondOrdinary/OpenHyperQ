@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using HyperQ.Util;
+using HyperQ.Util.Licensing;
 
 namespace HyperQ.MACE.Training
 {
@@ -25,6 +26,7 @@ namespace HyperQ.MACE.Training
         {
             if (other is null) return false;
             DynaEntry<T> b = other as DynaEntry<T>;
+            if (b is null) return false;
             if (EqualityComparer<T>.Default.Equals(b.Item1, Item1))
             {
                 for (int i = 0; i < Item2.Length; i++)
@@ -37,7 +39,9 @@ namespace HyperQ.MACE.Training
         }
         public override bool Equals(object o)
         {
-            return o.GetHashCode() == GetHashCode();
+            // Compare via the strongly typed equality rather than hash codes:
+            // distinct entries can share a hash without being equal.
+            return Equals(o as IDynaEntry);
         }
 
         public override int GetHashCode()
@@ -67,9 +71,11 @@ namespace HyperQ.MACE.Training
         private readonly Dictionary<IDynaEntry, Dictionary<T, double>> _T = new Dictionary<IDynaEntry, Dictionary<T, double>>();
 
         /// <summary>
-        /// Cached max of T[de]. Tuple is (state, probability)
+        /// Cached argmax of Tc[de]: (state, count), the most frequent next state so far (the first to reach that count
+        /// among equals). It used to keep (state, probability) and compare a new probability with the cached one,
+        /// which never shrank: the first next state seen had probability 1, so the model stayed on it for good.
         /// </summary>
-        private readonly Dictionary<IDynaEntry, Tuple<T, double>> _Tmax = new Dictionary<IDynaEntry, Tuple<T, double>>();
+        private readonly Dictionary<IDynaEntry, Tuple<T, int>> _Tmax = new Dictionary<IDynaEntry, Tuple<T, int>>();
 
         /// <summary>
         /// (s,a) = reward model (RT)
@@ -85,11 +91,14 @@ namespace HyperQ.MACE.Training
 
         public int DynaIterations { get; private set; } = 0;
         public int HistoryCapacity => _History?.Capacity ?? 0;
+        /// <summary>The number of (s,a) pairs the model has learned; planning has nothing to sample while it is 0.</summary>
+        public int Count => _Keys.Count;
         public bool PositiveOnly { get; private set; } = false;
 
 
         public DynaState(int iters = 500, int max_histories = 0, bool positive_only = false)
         {
+            FeatureGate.Require(HyperQFeatures.Dyna);
             DynaIterations = iters;
 
             if (max_histories > 0)
@@ -131,10 +140,9 @@ namespace HyperQ.MACE.Training
             return (UpdateT(s, a, sprime).UpdateR(s, a, r, hp));
         }
 
-        public IDynaEntry RandomSA(QRandom ran = null)
+        public IDynaEntry RandomSA(QRandom ran)
         {
-            if (ran == null)
-                ran = QRandom.Instance;
+            if (ran == null) throw new ArgumentNullException(nameof(ran));
             if (_Keys.Count == 0) throw new InvalidOperationException("DynaState has no learned (s,a) entries.");
             int ix = ran.Ran.Next(0, _Keys.Count);
             return _Keys[ix];
@@ -155,10 +163,10 @@ namespace HyperQ.MACE.Training
             if (_Tmax.TryGetValue(de, out var cached))
                 return new Tuple<T, RT>(cached.Item1, r);
 
-            // Find argmax probability
-            var best = sT.Aggregate((a, b) => a.Value >= b.Value ? a : b);
+            // Find the most frequent next state
+            var best = _Tc[de].Aggregate((a, b) => a.Value >= b.Value ? a : b);
             var ret = new Tuple<T, RT>(best.Key, r);
-            _Tmax[de] = new Tuple<T, double>(best.Key, best.Value);
+            _Tmax[de] = new Tuple<T, int>(best.Key, best.Value);
 
             return ret;
         }
@@ -206,12 +214,15 @@ namespace HyperQ.MACE.Training
             _Tc[de][sprime] += 1;
             _TcSum[de] += 1;
 
-            double p = (double)_Tc[de][sprime] / _TcSum[de];
-            _T[de][sprime] = p;
+            // Every next state's probability changes with the total, not just this one's.
+            Dictionary<T, double> probabilities = _T[de];
+            foreach (KeyValuePair<T, int> kv in _Tc[de])
+                probabilities[kv.Key] = (double)kv.Value / _TcSum[de];
 
-            // Update cached max
-            if (!_Tmax.TryGetValue(de, out var mx) || p > mx.Item2)
-                _Tmax[de] = new Tuple<T, double>(sprime, p);
+            // Update the cached most frequent next state: counts only grow, so compare counts.
+            int count = _Tc[de][sprime];
+            if (!_Tmax.TryGetValue(de, out var mx) || count > mx.Item2)
+                _Tmax[de] = new Tuple<T, int>(sprime, count);
 
             return this;
         }
